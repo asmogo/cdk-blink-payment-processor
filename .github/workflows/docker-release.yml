@@ -2,9 +2,7 @@ name: Docker build and release
 
 on:
   push:
-    tags:
-      - "v*"
-      - "[0-9]+.[0-9]+.[0-9]+"
+
   workflow_dispatch:
 
 concurrency:
@@ -41,7 +39,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=semver,pattern={{version}}
