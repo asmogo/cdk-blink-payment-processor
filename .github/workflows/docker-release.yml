@@ -2,7 +2,6 @@ name: Docker build and release
 
 on:
   push:
-    branches: [ "main", "master" ]
     tags:
       - "v*"
       - "[0-9]+.[0-9]+.[0-9]+"
@@ -44,7 +43,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
