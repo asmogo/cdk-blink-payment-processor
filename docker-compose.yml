@@ -33,7 +33,7 @@ services:
       - CDK_MINTD_LN_BACKEND=fakewallet
       - CDK_MINTD_LISTEN_HOST=0.0.0.0
       - CDK_MINTD_LISTEN_PORT=8085
-      - CDK_MINTD_MNEMONIC=eye survey guilt napkin crystal cup whisper salt luggage manage unveil loyal
+      - CDK_MINTD_MNEMONIC=
       # Database configuration - choose one:
       # Option 1: SQLite (embedded, no additional setup needed)
       - CDK_MINTD_DATABASE=sqlite
