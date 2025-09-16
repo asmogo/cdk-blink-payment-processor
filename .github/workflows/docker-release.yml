@@ -44,7 +44,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
             type=semver,pattern={{version}},enable={{is_tag}}
             type=semver,pattern={{major}}.{{minor}},enable={{is_tag}}
             type=semver,pattern={{major}},enable={{is_tag}}
