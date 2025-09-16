@@ -1,0 +1,28 @@
+# Build artifacts
+target
+**/target
+
+# Git
+.git
+.gitignore
+
+# IDE/editor
+.vscode
+.idea
+*.swp
+
+# Node/yarn/npm cache if any (prevent bloat)
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env/config (avoid leaking secrets into build context)
+.env
+.env.*
+config.toml
+
+# Misc
+*.log
+*.tmp
+*.bak
