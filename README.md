@@ -31,11 +31,18 @@ Status: core RPCs and streaming implemented. No persistent database.
 Configuration can be provided via a config file at the repository root or environment variables. Default values are in [src/settings.rs](src/settings.rs).
 
 Example [config.toml](config.toml):
-```
+```toml
 blink_api_url = "https://api.blink.sv/graphql"
-blink_api_key = "your_api_key"
+blink_api_key = "<your key>"
 blink_wallet_id = ""        # optional; default wallet used when empty
 server_port = 50051         # gRPC listen port
+# TLS configuration
+# Enable TLS on the gRPC server. If true and the cert/key don't exist,
+# the server will generate a self-signed cert for localhost and write it
+# to the given paths.
+tls_enable = false
+tls_cert_path = "certs/server.crt"
+tls_key_path = "certs/server.key"
 ```
 
 Environment variables override file values:
