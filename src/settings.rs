@@ -7,6 +7,10 @@ pub struct Config {
     pub blink_api_key: String,
     pub blink_wallet_id: String,
     pub server_port: u16,
+    // TLS config for gRPC server
+    pub tls_enable: bool,
+    pub tls_cert_path: String,
+    pub tls_key_path: String,
 }
 
 impl Default for Config {
@@ -16,6 +20,9 @@ impl Default for Config {
             blink_api_key: "".to_string(),
             blink_wallet_id: "".to_string(),
             server_port: 50051,
+            tls_enable: false,
+            tls_cert_path: "certs/server.crt".to_string(),
+            tls_key_path: "certs/server.key".to_string(),
         }
     }
 }
@@ -23,20 +30,24 @@ impl Default for Config {
 impl Config {
     /// Load from config.toml (if present) and environment variables.
     /// Environment variables override file values.
-    /// Supported env keys: BLINK_API_URL, BLINK_API_KEY, BLINK_WALLET_ID, SERVER_PORT
+    /// Supported env keys: BLINK_API_URL, BLINK_API_KEY, BLINK_WALLET_ID, SERVER_PORT, TLS_ENABLE, TLS_CERT_PATH, TLS_KEY_PATH
     pub fn load() -> Self {
-        // 1) Start with defaults + config.toml (NOT nested)
+        // 1) Start with defaults + config.toml only if it exists
         let base: Config = Default::default();
-        let mut cfg: Config = Figment::from(Serialized::defaults(base))
-            .merge(Toml::file("config.toml"))
-            .extract()
-            .unwrap_or_default();
+        let mut fig = Figment::from(Serialized::defaults(base));
+        if std::path::Path::new("config.toml").exists() {
+            fig = fig.merge(Toml::file("config.toml"));
+        }
+        let mut cfg: Config = fig.extract().unwrap_or_default();
 
         // 2) Overlay environment variables explicitly
         if let Ok(v) = std::env::var("BLINK_API_URL")      { cfg.blink_api_url = v; }
         if let Ok(v) = std::env::var("BLINK_API_KEY")      { cfg.blink_api_key = v; }
         if let Ok(v) = std::env::var("BLINK_WALLET_ID")    { cfg.blink_wallet_id = v; }
         if let Ok(v) = std::env::var("SERVER_PORT")        { cfg.server_port = v.parse().unwrap_or(cfg.server_port); }
+        if let Ok(v) = std::env::var("TLS_ENABLE")         { cfg.tls_enable = matches!(v.as_str(), "1"|"true"|"TRUE"|"yes"|"YES"); }
+        if let Ok(v) = std::env::var("TLS_CERT_PATH")      { cfg.tls_cert_path = v; }
+        if let Ok(v) = std::env::var("TLS_KEY_PATH")       { cfg.tls_key_path = v; }
 
         cfg
     }
@@ -272,6 +283,9 @@ blink_api_key = "partial-key"
             blink_api_key: "roundtrip-key".to_string(),
             blink_wallet_id: "roundtrip-wallet".to_string(),
             server_port: 25000,
+            tls_enable: true,
+            tls_cert_path: "p.crt".into(),
+            tls_key_path: "p.key".into(),
         };
         let json = serde_json::to_string(&cfg).expect("serialize config");
         let back: Config = serde_json::from_str(&json).expect("deserialize config");

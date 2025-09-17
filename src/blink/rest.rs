@@ -302,6 +302,9 @@ mod tests {
             blink_api_key: api_key.to_string(),
             blink_wallet_id: wallet_id.to_string(),
             server_port: 0,
+            tls_enable: false,
+            tls_cert_path: "".into(),
+            tls_key_path: "".into(),
         };
         BlinkClient::new(&cfg).expect("blink client")
     }
