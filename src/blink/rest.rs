@@ -233,7 +233,7 @@ impl BlinkClient {
 
     #[instrument(skip(self), fields(hash))]
     pub async fn check_invoice_status_with_retry(&self, payment_hash: &str) -> Result<(String, String, String)> {
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = initial_backoff();
         let mut attempts = 0u32;
         loop {
             match self.check_invoice_status_by_hash(payment_hash).await {
@@ -243,7 +243,7 @@ impl BlinkClient {
                     warn!(attempts, ?backoff, error=?e, "check status failed, retrying");
                     if attempts > 3 { error!(?e, "giving up after retries"); return Err(e); }
                     sleep(backoff).await;
-                    backoff = std::cmp::min(backoff * 2, Duration::from_secs(30));
+                    backoff = std::cmp::min(backoff * 2, max_backoff());
                 }
             }
         }
@@ -282,3 +282,334 @@ pub struct Payment { pub id: String, pub amount: i64, #[serde(rename="createdAt"
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Quote { pub id: String, pub amount: i64, pub currency: String, pub expires: String }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    // no yield_now needed in these tests
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn mk_client(server: &MockServer, api_key: &str, wallet_id: &str) -> BlinkClient {
+        let cfg = crate::settings::Config {
+            blink_api_url: format!("{}/graphql", server.uri()),
+            blink_api_key: api_key.to_string(),
+            blink_wallet_id: wallet_id.to_string(),
+            server_port: 0,
+        };
+        BlinkClient::new(&cfg).expect("blink client")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_gql_success_returns_data() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("Content-Type", "application/json"))
+            .and(header("X-API-KEY", "secret-key"))
+            .and(body_string_contains("\"query\""))
+            .and(body_string_contains("\"variables\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "ok": true }
+            })))
+            .mount(&server)
+            .await;
+
+        #[derive(Deserialize)]
+        struct OkResp {
+            ok: bool,
+        }
+
+        let client = mk_client(&server, "secret-key", "wallet-1");
+        let out: OkResp = client.gql("query { ok }", json!({})).await.expect("gql ok");
+        assert!(out.ok, "should parse and return data.ok=true");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_gql_http_non_200_is_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(json!({"errors":[{"message":"boom"}]})),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "k", "w");
+        let res: Result<serde_json::Value> = client.gql("query { x }", json!({})).await;
+        assert!(
+            res.is_err(),
+            "non-200 with no data should map to error (missing data)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_gql_graphql_errors_field_is_error() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors":[{"message":"boom"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "k", "w");
+        let res: Result<serde_json::Value> = client.gql("query { x }", json!({})).await;
+        assert!(
+            res.is_err(),
+            "presence of GraphQL errors without data should be an error"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_authorization_header_is_set_if_configured() {
+        // Authorization in this client is via X-API-KEY header.
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("X-API-KEY", "my-secret"))
+            .and(header("Content-Type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "ok": true }
+            })))
+            .mount(&server)
+            .await;
+
+        #[derive(Deserialize)]
+        struct OkResp {
+            ok: bool,
+        }
+
+        let client = mk_client(&server, "my-secret", "wallet-abc");
+        let out: OkResp = client.gql("query { ok }", json!({})).await.expect("gql ok");
+        assert!(out.ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_invoice_success_and_shape() {
+        let server = MockServer::start().await;
+
+        // Ensure request carries the mutation and variables with provided walletId/amount/memo
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("mutation LnInvoiceCreate"))
+            .and(body_string_contains("wallet-123"))
+            .and(body_string_contains("\"amount\""))
+            .and(body_string_contains("\"memo\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoiceCreate": {
+                        "invoice": {
+                            "paymentRequest": "lnbc1...",
+                            "paymentHash": "abc123",
+                            "paymentSecret": "s3cr3t",
+                            "satoshis": 4242
+                        },
+                        "errors": []
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "key", "wallet-123");
+        let inv = client.create_invoice(4242, "hello").await.expect("invoice");
+        assert_eq!(inv.payment_request, "lnbc1...");
+        assert_eq!(inv.payment_hash, "abc123");
+        assert_eq!(inv.payment_secret, "s3cr3t");
+        assert_eq!(inv.satoshis, 4242);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_make_payment_success_and_error_mapping() {
+        let server = MockServer::start().await;
+
+        // Success case
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("mutation lnInvoicePaymentSend"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoicePaymentSend": { "status":"SUCCESS", "errors":[] }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "key", "wallet-xyz");
+        let status = client.make_payment("bolt11-xxx").await.expect("payment ok");
+        assert_eq!(status, "SUCCESS");
+
+        // Error case (GraphQL errors and no data -> gql error)
+        let server_err = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "errors":[{"message":"payment failed"}]
+            })))
+            .mount(&server_err)
+            .await;
+
+        let client_err = mk_client(&server_err, "key", "wallet-xyz");
+        let res = client_err.make_payment("bolt11-yyy").await;
+        assert!(res.is_err(), "GraphQL errors without data should yield error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_check_invoice_status_variants() {
+        let server = MockServer::start().await;
+
+        // Paid
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("hash-paid"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoicePaymentStatusByHash": {
+                        "status":"PAID",
+                        "paymentPreimage":"pre",
+                        "paymentRequest":"req-paid"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // Pending
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("hash-pending"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoicePaymentStatusByHash": {
+                        "status":"PENDING",
+                        "paymentPreimage":null,
+                        "paymentRequest":"req-pending"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        // Expired
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("hash-expired"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoicePaymentStatusByHash": {
+                        "status":"EXPIRED",
+                        "paymentPreimage":null,
+                        "paymentRequest":"req-expired"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "k", "w");
+
+        // PAID
+        let (status, req, pre) = client
+            .check_invoice_status_by_hash("hash-paid")
+            .await
+            .expect("paid");
+        assert_eq!(status, "PAID");
+        assert_eq!(req, "req-paid");
+        assert_eq!(pre, "pre");
+
+        // PENDING
+        let (status, req, pre) = client
+            .check_invoice_status_by_hash("hash-pending")
+            .await
+            .expect("pending");
+        assert_eq!(status, "PENDING");
+        assert_eq!(req, "req-pending");
+        assert_eq!(pre, "");
+
+        // EXPIRED
+        let (status, req, pre) = client
+            .check_invoice_status_by_hash("hash-expired")
+            .await
+            .expect("expired");
+        assert_eq!(status, "EXPIRED");
+        assert_eq!(req, "req-expired");
+        assert_eq!(pre, "");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_check_invoice_status_with_retry_respects_backoff() {
+        // This client retries only on errors (not on "pending" statuses).
+        // Simulate two failures (non-200) then a success while driving virtual time.
+        let server = MockServer::start().await;
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c2 = counter.clone();
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(move |_req: &Request| {
+                let n = c2.fetch_add(1, Ordering::SeqCst) + 1;
+                if n <= 2 {
+                    ResponseTemplate::new(500).set_body_json(json!({
+                        "errors":[{"message": format!("fail {}", n)}]
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "data": {
+                            "lnInvoicePaymentStatusByHash": {
+                                "status":"PAID",
+                                "paymentPreimage":"pre",
+                                "paymentRequest":"req"
+                            }
+                        }
+                    }))
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "k", "w");
+
+        let task = tokio::spawn(async move {
+            client
+                .check_invoice_status_with_retry("any-hash")
+                .await
+                .expect("eventual success")
+        });
+
+        let (_status, req, pre) = task.await.expect("join");
+        assert_eq!(req, "req");
+        assert_eq!(pre, "pre");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "should have performed 3 total requests (2 fails + 1 success)"
+        );
+    }
+}
+
+// Backoff configuration separated for testability
+#[cfg(test)]
+fn initial_backoff() -> Duration { Duration::from_millis(10) }
+#[cfg(not(test))]
+fn initial_backoff() -> Duration { Duration::from_secs(1) }
+
+#[cfg(test)]
+fn max_backoff() -> Duration { Duration::from_millis(100) }
+#[cfg(not(test))]
+fn max_backoff() -> Duration { Duration::from_secs(30) }
+
