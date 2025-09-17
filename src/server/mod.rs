@@ -317,7 +317,7 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                     // let typename = update.get("__typename").and_then(|s| s.as_str()).unwrap_or("");
                     // if typename == "LnUpdate" {
                     // Extract fields
-                    let _status = update.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    let status = update.get("status").and_then(|s| s.as_str()).unwrap_or("");
 
                     // preimage may be absent in some events
                     let preimage = update
@@ -340,7 +340,13 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                         .and_then(|iv| iv.get("paymentHash").and_then(|h| h.as_str()))
                         .unwrap_or("")
                         .to_string();
-
+                    // has to be PAID status
+                    if !status.eq_ignore_ascii_case("PAID") {
+                        continue;
+                    }
+                    if payment_hash.is_empty()  {
+                        continue;
+                    }
                     let resp = pb::WaitIncomingPaymentResponse {
                         payment_identifier: Some(PaymentIdentifier {
                             r#type: pb::PaymentIdentifierType::PaymentHash as i32,
