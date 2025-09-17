@@ -1,7 +1,7 @@
-use std::ops::Div;
 use anyhow::Result;
 use async_trait::async_trait;
 use lightning_invoice::Bolt11Invoice;
+use std::ops::Div;
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
@@ -41,7 +41,9 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
         if let Some(opts) = req.options.and_then(|o| o.options) {
             match opts {
                 pb::incoming_payment_options::Options::Bolt11(b11) => amount = b11.amount,
-                pb::incoming_payment_options::Options::Bolt12(b12) => amount = b12.amount.unwrap_or_default(),
+                pb::incoming_payment_options::Options::Bolt12(b12) => {
+                    amount = b12.amount.unwrap_or_default()
+                }
             }
         }
         let inv = self
@@ -52,7 +54,12 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
 
         // Align to Go: RequestIdentifier should be PAYMENT_HASH with the invoice's payment hash
         let resp = pb::CreatePaymentResponse {
-            request_identifier: Some(pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentHash as i32, value: Some(pb::payment_identifier::Value::Hash(inv.payment_hash.clone())) }),
+            request_identifier: Some(pb::PaymentIdentifier {
+                r#type: pb::PaymentIdentifierType::PaymentHash as i32,
+                value: Some(pb::payment_identifier::Value::Hash(
+                    inv.payment_hash.clone(),
+                )),
+            }),
             request: inv.payment_request.clone(),
             expiry: None,
         };
@@ -68,16 +75,35 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             .blink
             .check_invoice_status_by_request(&req.request)
             .await
-            .map_err(|e| Status::internal(format!("failed to resolve payment hash from invoice: {}", e)))?;
+            .map_err(|e| {
+                Status::internal(format!(
+                    "failed to resolve payment hash from invoice: {}",
+                    e
+                ))
+            })?;
 
         match pb::OutgoingPaymentRequestType::from_i32(req.request_type) {
             Some(pb::OutgoingPaymentRequestType::Bolt11Invoice) => {
                 // Decode locally using lightning-invoice
-                let inv: Bolt11Invoice = req.request.parse().map_err(|e| Status::invalid_argument(format!("invalid bolt11: {}", e)))?;
-                let amount_msat = inv.amount_milli_satoshis().ok_or_else(|| Status::invalid_argument("amountless invoice unsupported"))?;
+                let inv: Bolt11Invoice = req
+                    .request
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid bolt11: {}", e)))?;
+                let amount_msat = inv
+                    .amount_milli_satoshis()
+                    .ok_or_else(|| Status::invalid_argument("amountless invoice unsupported"))?;
                 let amount_sat = amount_msat / 1000;
-                let payment_identifier = pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentHash as i32, value: Some(pb::payment_identifier::Value::Hash(payment_hash.clone())) };
-                Ok(Response::new(pb::PaymentQuoteResponse { request_identifier: Some(payment_identifier), amount: amount_sat as u64, fee: 0, state: pb::QuoteState::Unknown as i32, unit: req.unit }))
+                let payment_identifier = pb::PaymentIdentifier {
+                    r#type: pb::PaymentIdentifierType::PaymentHash as i32,
+                    value: Some(pb::payment_identifier::Value::Hash(payment_hash.clone())),
+                };
+                Ok(Response::new(pb::PaymentQuoteResponse {
+                    request_identifier: Some(payment_identifier),
+                    amount: amount_sat as u64,
+                    fee: 0,
+                    state: pb::QuoteState::Unknown as i32,
+                    unit: req.unit,
+                }))
             }
             Some(pb::OutgoingPaymentRequestType::Bolt12Offer) => {
                 let q = self
@@ -85,7 +111,13 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                     .get_offer_quote(&req.request)
                     .await
                     .map_err(|e| Status::internal(format!("offer quote failed: {}", e)))?;
-                Ok(Response::new(pb::PaymentQuoteResponse { request_identifier: None, amount: q.amount as u64, fee: 0, state: pb::QuoteState::Unknown as i32, unit: q.currency }))
+                Ok(Response::new(pb::PaymentQuoteResponse {
+                    request_identifier: None,
+                    amount: q.amount as u64,
+                    fee: 0,
+                    state: pb::QuoteState::Unknown as i32,
+                    unit: q.currency,
+                }))
             }
             None => Err(Status::invalid_argument("unsupported request type")),
         }
@@ -102,7 +134,7 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             match v {
                 pb::outgoing_payment_variant::Options::Bolt11(b11) => {
                     bolt11 = b11.bolt11;
-                },
+                }
                 pb::outgoing_payment_variant::Options::Bolt12(b12) => bolt11 = b12.offer, // simplistic, actual BOLT12 flow differs
             }
         }
@@ -119,21 +151,28 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             .blink
             .check_invoice_status_by_request(&bolt11)
             .await
-            .map_err(|e| Status::internal(format!("failed to resolve payment hash from invoice: {}", e)))?;
+            .map_err(|e| {
+                Status::internal(format!(
+                    "failed to resolve payment hash from invoice: {}",
+                    e
+                ))
+            })?;
 
         let quote_state = match status.as_str() {
             "SUCCESS" => pb::QuoteState::Paid,
             "PENDING" => pb::QuoteState::Pending,
             _ => pb::QuoteState::Unknown,
         } as i32;
-        let inv: Bolt11Invoice = bolt11.parse().map_err(|e| Status::invalid_argument(format!("invalid bolt11: {}", e)))?;
-        let msat = inv
-            .amount_milli_satoshis()
-            .ok_or_else(|| 0);
-
+        let inv: Bolt11Invoice = bolt11
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid bolt11: {}", e)))?;
+        let msat = inv.amount_milli_satoshis().ok_or_else(|| 0);
 
         let resp = pb::MakePaymentResponse {
-            payment_identifier: Some(pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentHash as i32, value: Some(pb::payment_identifier::Value::Hash(payment_hash)) }),
+            payment_identifier: Some(pb::PaymentIdentifier {
+                r#type: pb::PaymentIdentifierType::PaymentHash as i32,
+                value: Some(pb::payment_identifier::Value::Hash(payment_hash)),
+            }),
             payment_proof: Some(status),
             status: quote_state,
             total_spent: msat.unwrap().div(1000),
@@ -150,7 +189,10 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
         let pid = req
             .request_identifier
             .ok_or_else(|| Status::invalid_argument("missing request_identifier"))?;
-        let hash = match pid.value { Some(pb::payment_identifier::Value::Hash(h)) => h, _ => return Err(Status::invalid_argument("expected payment hash")) };
+        let hash = match pid.value {
+            Some(pb::payment_identifier::Value::Hash(h)) => h,
+            _ => return Err(Status::invalid_argument("expected payment hash")),
+        };
         let (status, payment_request, preimage) = self
             .blink
             .check_invoice_status_with_retry(&hash)
@@ -158,10 +200,20 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             .map_err(|e| Status::internal(format!("query blink failed: {}", e)))?;
         let mut amount_sat = 0u64;
         if status.eq_ignore_ascii_case("PAID") {
-            if let Ok(inv) = payment_request.parse::<Bolt11Invoice>() { amount_sat = inv.amount_milli_satoshis().unwrap_or(0) as u64 / 1000; }
+            if let Ok(inv) = payment_request.parse::<Bolt11Invoice>() {
+                amount_sat = inv.amount_milli_satoshis().unwrap_or(0) as u64 / 1000;
+            }
         }
         let resp = pb::CheckIncomingPaymentResponse {
-            payments: vec![pb::WaitIncomingPaymentResponse { payment_identifier: Some(pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentHash as i32, value: Some(pb::payment_identifier::Value::Hash(hash)) }), payment_amount: amount_sat, unit: "sat".to_string(), payment_id: preimage }],
+            payments: vec![pb::WaitIncomingPaymentResponse {
+                payment_identifier: Some(pb::PaymentIdentifier {
+                    r#type: pb::PaymentIdentifierType::PaymentHash as i32,
+                    value: Some(pb::payment_identifier::Value::Hash(hash)),
+                }),
+                payment_amount: amount_sat,
+                unit: "sat".to_string(),
+                payment_id: preimage,
+            }],
         };
         Ok(Response::new(resp))
     }
@@ -178,13 +230,14 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
         // Support both PaymentId and PaymentHash for better compatibility.
         match pid.value {
             Some(pb::payment_identifier::Value::Id(id)) => {
-                let payment = self
-                    .blink
-                    .get_outgoing_payment(&id)
-                    .await
-                    .map_err(|e| Status::internal(format!("failed to fetch outgoing payment: {}", e)))?;
+                let payment = self.blink.get_outgoing_payment(&id).await.map_err(|e| {
+                    Status::internal(format!("failed to fetch outgoing payment: {}", e))
+                })?;
                 let resp = pb::MakePaymentResponse {
-                    payment_identifier: Some(pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentId as i32, value: Some(pb::payment_identifier::Value::Id(payment.id.clone())) }),
+                    payment_identifier: Some(pb::PaymentIdentifier {
+                        r#type: pb::PaymentIdentifierType::PaymentId as i32,
+                        value: Some(pb::payment_identifier::Value::Id(payment.id.clone())),
+                    }),
                     payment_proof: None,
                     status: pb::QuoteState::Unknown as i32,
                     total_spent: payment.amount as u64,
@@ -198,7 +251,9 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                     .blink
                     .check_invoice_status_with_retry(&hash)
                     .await
-                    .map_err(|e| Status::internal(format!("failed to check payment by hash: {}", e)))?;
+                    .map_err(|e| {
+                        Status::internal(format!("failed to check payment by hash: {}", e))
+                    })?;
                 let state = match status.as_str() {
                     "PAID" => pb::QuoteState::Paid,
                     "PENDING" => pb::QuoteState::Pending,
@@ -207,10 +262,15 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                 } as i32;
                 let mut total_spent = 0u64;
                 if state == pb::QuoteState::Paid as i32 {
-                    if let Ok(inv) = payment_request.parse::<Bolt11Invoice>() { total_spent = inv.amount_milli_satoshis().unwrap_or(0) as u64 / 1000; }
+                    if let Ok(inv) = payment_request.parse::<Bolt11Invoice>() {
+                        total_spent = inv.amount_milli_satoshis().unwrap_or(0) as u64 / 1000;
+                    }
                 }
                 let resp = pb::MakePaymentResponse {
-                    payment_identifier: Some(pb::PaymentIdentifier { r#type: pb::PaymentIdentifierType::PaymentHash as i32, value: Some(pb::payment_identifier::Value::Hash(hash)) }),
+                    payment_identifier: Some(pb::PaymentIdentifier {
+                        r#type: pb::PaymentIdentifierType::PaymentHash as i32,
+                        value: Some(pb::payment_identifier::Value::Hash(hash)),
+                    }),
                     payment_proof: None,
                     status: state,
                     total_spent,
@@ -222,14 +282,16 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
         }
     }
 
-    type WaitIncomingPaymentStream = tokio_stream::wrappers::ReceiverStream<Result<pb::WaitIncomingPaymentResponse, Status>>;
+    type WaitIncomingPaymentStream =
+        tokio_stream::wrappers::ReceiverStream<Result<pb::WaitIncomingPaymentResponse, Status>>;
 
     async fn wait_incoming_payment(
         &self,
         _request: Request<pb::EmptyRequest>,
     ) -> Result<Response<Self::WaitIncomingPaymentStream>, Status> {
         // Application stream to client
-        let (app_tx, app_rx) = mpsc::channel::<Result<pb::WaitIncomingPaymentResponse, Status>>(100);
+        let (app_tx, app_rx) =
+            mpsc::channel::<Result<pb::WaitIncomingPaymentResponse, Status>>(100);
 
         // Internal channel for raw WS JSON
         let (ws_tx, mut ws_rx) = mpsc::channel::<serde_json::Value>(100);
@@ -246,7 +308,10 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             use pb::{payment_identifier, PaymentIdentifier};
             while let Some(v) = ws_rx.recv().await {
                 let maybe_update = v
-                    .get("payload").and_then(|p| p.get("data")).and_then(|d| d.get("myUpdates")).and_then(|mu| mu.get("update"));
+                    .get("payload")
+                    .and_then(|p| p.get("data"))
+                    .and_then(|d| d.get("myUpdates"))
+                    .and_then(|mu| mu.get("update"));
                 if let Some(update) = maybe_update {
                     // Be tolerant: not all payloads include __typename
                     // let typename = update.get("__typename").and_then(|s| s.as_str()).unwrap_or("");
@@ -255,7 +320,11 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                     let _status = update.get("status").and_then(|s| s.as_str()).unwrap_or("");
 
                     // preimage may be absent in some events
-                    let preimage = update.get("preimage").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let preimage = update
+                        .get("preimage")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
                     let txn = update.get("transaction");
 
@@ -272,7 +341,6 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                         .unwrap_or("")
                         .to_string();
 
-           
                     let resp = pb::WaitIncomingPaymentResponse {
                         payment_identifier: Some(PaymentIdentifier {
                             r#type: pb::PaymentIdentifierType::PaymentHash as i32,
@@ -290,6 +358,8 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
             }
         });
 
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(app_rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            app_rx,
+        )))
     }
 }
