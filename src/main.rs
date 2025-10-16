@@ -1,15 +1,15 @@
+mod blink;
 mod pb;
 mod server;
-mod blink;
 mod settings;
 
 use crate::server::PaymentProcessorService;
 use anyhow::Result;
+use rcgen::generate_simple_self_signed;
 use std::{fs, net::SocketAddr, path::Path};
-use tonic::transport::{Server, ServerTlsConfig, Identity};
-use tracing_subscriber::EnvFilter;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic_reflection::server::Builder as ReflectionBuilder;
-use rcgen::{generate_simple_self_signed};
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +31,10 @@ async fn main() -> Result<()> {
         .build_v1()?; // use v1 to satisfy grpcurl reflection
 
     // Build server, optionally with TLS
-    let mut builder = Server::builder();
+    let mut builder = Server::builder()
+        .http2_keepalive_interval(Some(cfg.keep_alive_interval))
+        .http2_keepalive_timeout(Some(cfg.keep_alive_timeout))
+        .max_connection_age(cfg.max_connection_age);
 
     if cfg.tls_enable {
         // Ensure cert files exist, generate self-signed if missing
@@ -51,9 +54,15 @@ async fn main() -> Result<()> {
                 cert=%cert_path.display(), key=%key_path.display(),
                 "TLS enabled but certificate or key not found; generating CA and server certificate"
             );
-            if let Some(parent) = cert_path.parent() { let _ = fs::create_dir_all(parent); }
-            if let Some(parent) = key_path.parent() { let _ = fs::create_dir_all(parent); }
-            if let Some(parent) = ca_path.parent() { let _ = fs::create_dir_all(parent); }
+            if let Some(parent) = cert_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Some(parent) = key_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Some(parent) = ca_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
 
             // Generate a simple CA certificate
             let mut ca_params = rcgen::CertificateParams::default();
@@ -69,7 +78,8 @@ async fn main() -> Result<()> {
             let ca_cert = rcgen::Certificate::from_params(ca_params).expect("generate CA cert");
 
             // Generate a server certificate signed by the CA
-            let mut server_params = rcgen::CertificateParams::new(vec!["localhost".into(),"127.0.0.1".into()]);
+            let mut server_params =
+                rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]);
             server_params
                 .distinguished_name
                 .push(rcgen::DnType::CommonName, "localhost");
@@ -80,7 +90,8 @@ async fn main() -> Result<()> {
                 .extended_key_usages
                 .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
 
-            let server_cert = rcgen::Certificate::from_params(server_params).expect("generate server cert");
+            let server_cert =
+                rcgen::Certificate::from_params(server_params).expect("generate server cert");
             let server_cert_pem = server_cert
                 .serialize_pem_with_signer(&ca_cert)
                 .expect("serialize server cert pem");
@@ -114,10 +125,13 @@ async fn main() -> Result<()> {
         tracing::info!(addr=%addr, "Starting plaintext gRPC server");
     }
 
-
     builder
         .add_service(reflection_svc)
-        .add_service(pb::cdk_payment_processor::cdk_payment_processor_server::CdkPaymentProcessorServer::new(svc))
+        .add_service(
+            pb::cdk_payment_processor::cdk_payment_processor_server::CdkPaymentProcessorServer::new(
+                svc,
+            ),
+        )
         .serve(addr)
         .await?;
 

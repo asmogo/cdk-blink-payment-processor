@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, info, warn, error, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::settings::Config;
 
@@ -18,9 +18,7 @@ pub struct BlinkClient {
 
 impl BlinkClient {
     pub fn new(cfg: &Config) -> Result<Self> {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()?;
+        let http = Client::builder().timeout(Duration::from_secs(15)).build()?;
         let base_url = Url::parse(&cfg.blink_api_url)?;
         Ok(Self {
             http,
@@ -30,8 +28,12 @@ impl BlinkClient {
         })
     }
 
-    pub fn api_url(&self) -> &Url { &self.base_url }
-    pub fn api_key_str(&self) -> &str { &self.api_key }
+    pub fn api_url(&self) -> &Url {
+        &self.base_url
+    }
+    pub fn api_key_str(&self) -> &str {
+        &self.api_key
+    }
 
     #[instrument(skip(self, variables, query), fields(url=%self.base_url))]
     async fn gql<T: for<'de> Deserialize<'de>>(&self, query: &str, variables: Value) -> Result<T> {
@@ -48,9 +50,15 @@ impl BlinkClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| { error!(error=?e, "blink.gql network error"); e })?;
+            .map_err(|e| {
+                error!(error=?e, "blink.gql network error");
+                e
+            })?;
         let status = res.status();
-        let txt = res.text().await.map_err(|e| { error!(error=?e, "blink.gql read body failed"); e })?;
+        let txt = res.text().await.map_err(|e| {
+            error!(error=?e, "blink.gql read body failed");
+            e
+        })?;
         debug!(?status, body_len = txt.len(), "blink.gql response received");
         if !status.is_success() {
             error!(?status, body_snippet = %txt.chars().take(200).collect::<String>(), "blink.gql non-200 status");
@@ -61,9 +69,11 @@ impl BlinkClient {
             errors: Option<Vec<GraphQLError>>,
         }
         #[derive(Deserialize, Debug)]
-        struct GraphQLError { message: String }
-        let parsed: GraphQL<T> = serde_json::from_str(&txt)
-            .with_context(|| format!("decode gql response: {}", txt))?;
+        struct GraphQLError {
+            message: String,
+        }
+        let parsed: GraphQL<T> =
+            serde_json::from_str(&txt).with_context(|| format!("decode gql response: {}", txt))?;
         if let Some(errs) = parsed.errors.as_ref() {
             if !errs.is_empty() {
                 error!(errors=?errs, "blink.gql returned errors");
@@ -79,11 +89,18 @@ impl BlinkClient {
         query me { me { defaultAccount { wallets { id walletCurrency balance } } } }
         "#;
         #[derive(Deserialize)]
-        struct Resp { me: Me }
+        struct Resp {
+            me: Me,
+        }
         #[derive(Deserialize)]
-        struct Me { #[serde(rename = "defaultAccount")] default_account: DefaultAccount }
+        struct Me {
+            #[serde(rename = "defaultAccount")]
+            default_account: DefaultAccount,
+        }
         #[derive(Deserialize)]
-        struct DefaultAccount { wallets: Vec<Wallet> }
+        struct DefaultAccount {
+            wallets: Vec<Wallet>,
+        }
         let resp: Resp = self.gql(q, serde_json::json!({})).await?;
         let wallets = resp.me.default_account.wallets;
         info!(count = wallets.len(), "wallets fetched");
@@ -92,8 +109,14 @@ impl BlinkClient {
             Ok(w)
         } else {
             match wallets.into_iter().next() {
-                Some(w) => { info!(wallet_id=%w.id, currency=%w.wallet_currency, "selected first wallet"); Ok(w) }
-                None => { error!("no wallet found"); Err(anyhow!("no wallet found")) }
+                Some(w) => {
+                    info!(wallet_id=%w.id, currency=%w.wallet_currency, "selected first wallet");
+                    Ok(w)
+                }
+                None => {
+                    error!("no wallet found");
+                    Err(anyhow!("no wallet found"))
+                }
             }
         }
     }
@@ -101,7 +124,8 @@ impl BlinkClient {
     #[instrument(skip(self), fields(amount, memo))]
     pub async fn create_invoice(&self, amount: u64, memo: &str) -> Result<InvoiceDetails> {
         let wallet_id = if self.wallet_id.is_empty() {
-            let w = self.get_default_wallet().await?; w.id
+            let w = self.get_default_wallet().await?;
+            w.id
         } else {
             self.wallet_id.clone()
         };
@@ -115,9 +139,15 @@ impl BlinkClient {
         }
         "#;
         #[derive(Deserialize)]
-        struct Resp { #[serde(rename = "lnInvoiceCreate")] ln_invoice_create: LnInvoiceCreate }
+        struct Resp {
+            #[serde(rename = "lnInvoiceCreate")]
+            ln_invoice_create: LnInvoiceCreate,
+        }
         #[derive(Deserialize)]
-        struct LnInvoiceCreate { invoice: Option<InvoiceDetails>, errors: Option<Vec<ErrorDetail>> }
+        struct LnInvoiceCreate {
+            invoice: Option<InvoiceDetails>,
+            errors: Option<Vec<ErrorDetail>>,
+        }
         let resp: Resp = self
             .gql(
                 q,
@@ -131,7 +161,10 @@ impl BlinkClient {
                 error!(errors=?errs, "invoice creation errors");
             }
         }
-        let inv = resp.ln_invoice_create.invoice.ok_or_else(|| anyhow!("invoice not present"))?;
+        let inv = resp
+            .ln_invoice_create
+            .invoice
+            .ok_or_else(|| anyhow!("invoice not present"))?;
         info!(hash=%inv.payment_hash, satoshis=inv.satoshis, "invoice created");
         Ok(inv)
     }
@@ -145,17 +178,27 @@ impl BlinkClient {
         }
         "#;
         #[derive(Deserialize)]
-        struct Resp { #[serde(rename = "lnInvoicePaymentSend")] ln_invoice_payment_send: PaymentSend }
+        struct Resp {
+            #[serde(rename = "lnInvoicePaymentSend")]
+            ln_invoice_payment_send: PaymentSend,
+        }
         #[derive(Deserialize)]
-        struct PaymentSend { status: String, errors: Option<Vec<ErrorDetail>> }
+        struct PaymentSend {
+            status: String,
+            errors: Option<Vec<ErrorDetail>>,
+        }
         let wallet_id = if self.wallet_id.is_empty() {
             self.get_default_wallet().await?.id
-        } else { self.wallet_id.clone() };
+        } else {
+            self.wallet_id.clone()
+        };
         let resp: Resp = self
             .gql(q, serde_json::json!({"input": {"walletId": wallet_id, "paymentRequest": bolt11, "memo": ""}}))
             .await?;
         if let Some(errs) = resp.ln_invoice_payment_send.errors.as_ref() {
-            if !errs.is_empty() { error!(errors=?errs, "payment returned errors"); }
+            if !errs.is_empty() {
+                error!(errors=?errs, "payment returned errors");
+            }
         }
         info!(status=%resp.ln_invoice_payment_send.status, "payment done");
         Ok(resp.ln_invoice_payment_send.status)
@@ -163,7 +206,10 @@ impl BlinkClient {
 
     #[instrument(skip(self), fields(id))]
     #[instrument(skip(self), fields(req_len = payment_request.len()))]
-    pub async fn check_invoice_status_by_request(&self, payment_request: &str) -> Result<(String, String, String)> {
+    pub async fn check_invoice_status_by_request(
+        &self,
+        payment_request: &str,
+    ) -> Result<(String, String, String)> {
         info!("checking invoice status by request");
         let q = r#"
         query LnInvoicePaymentStatusByPaymentRequest($input: LnInvoicePaymentStatusByPaymentRequestInput!) {
@@ -175,11 +221,23 @@ impl BlinkClient {
         }
         "#;
         #[derive(Deserialize)]
-        struct Resp { #[serde(rename = "lnInvoicePaymentStatusByPaymentRequest")] by_req: StatusByReq }
+        struct Resp {
+            #[serde(rename = "lnInvoicePaymentStatusByPaymentRequest")]
+            by_req: StatusByReq,
+        }
         #[derive(Deserialize)]
-        struct StatusByReq { status: String, #[serde(rename="paymentHash")] payment_hash: String, #[serde(rename="paymentPreimage")] payment_preimage: Option<String> }
+        struct StatusByReq {
+            status: String,
+            #[serde(rename = "paymentHash")]
+            payment_hash: String,
+            #[serde(rename = "paymentPreimage")]
+            payment_preimage: Option<String>,
+        }
         let resp: Resp = match self
-            .gql(q, serde_json::json!({"input": {"paymentRequest": payment_request}}))
+            .gql(
+                q,
+                serde_json::json!({"input": {"paymentRequest": payment_request}}),
+            )
             .await
         {
             Ok(r) => r,
@@ -202,14 +260,19 @@ impl BlinkClient {
         query payment($id: ID!) { payment(id: $id) { id amount createdAt } }
         "#;
         #[derive(Deserialize)]
-        struct Resp { payment: Payment }
+        struct Resp {
+            payment: Payment,
+        }
         let resp: Resp = self.gql(q, serde_json::json!({"id": id})).await?;
         info!(payment_id=%resp.payment.id, amount=resp.payment.amount, "outgoing payment fetched");
         Ok(resp.payment)
     }
 
     #[instrument(skip(self), fields(hash))]
-    pub async fn check_invoice_status_by_hash(&self, payment_hash: &str) -> Result<(String, String, String)> {
+    pub async fn check_invoice_status_by_hash(
+        &self,
+        payment_hash: &str,
+    ) -> Result<(String, String, String)> {
         info!(hash=%payment_hash, "checking invoice status by hash");
         let q = r#"
         query ($input: LnInvoicePaymentStatusByHashInput!) {
@@ -219,11 +282,23 @@ impl BlinkClient {
         }
         "#;
         #[derive(Deserialize)]
-        struct Resp { #[serde(rename = "lnInvoicePaymentStatusByHash")] ln_invoice_payment_status_by_hash: StatusByHash }
+        struct Resp {
+            #[serde(rename = "lnInvoicePaymentStatusByHash")]
+            ln_invoice_payment_status_by_hash: StatusByHash,
+        }
         #[derive(Deserialize)]
-        struct StatusByHash { status: String, #[serde(rename="paymentPreimage")] payment_preimage: Option<String>, #[serde(rename="paymentRequest")] payment_request: String }
+        struct StatusByHash {
+            status: String,
+            #[serde(rename = "paymentPreimage")]
+            payment_preimage: Option<String>,
+            #[serde(rename = "paymentRequest")]
+            payment_request: String,
+        }
         let resp: Resp = self
-            .gql(q, serde_json::json!({"input": {"paymentHash": payment_hash}}))
+            .gql(
+                q,
+                serde_json::json!({"input": {"paymentHash": payment_hash}}),
+            )
             .await?;
         let s = resp.ln_invoice_payment_status_by_hash;
         let preimage = s.payment_preimage.unwrap_or_default();
@@ -232,7 +307,10 @@ impl BlinkClient {
     }
 
     #[instrument(skip(self), fields(hash))]
-    pub async fn check_invoice_status_with_retry(&self, payment_hash: &str) -> Result<(String, String, String)> {
+    pub async fn check_invoice_status_with_retry(
+        &self,
+        payment_hash: &str,
+    ) -> Result<(String, String, String)> {
         let mut backoff = initial_backoff();
         let mut attempts = 0u32;
         loop {
@@ -241,7 +319,10 @@ impl BlinkClient {
                 Err(e) => {
                     attempts += 1;
                     warn!(attempts, ?backoff, error=?e, "check status failed, retrying");
-                    if attempts > 3 { error!(?e, "giving up after retries"); return Err(e); }
+                    if attempts > 3 {
+                        error!(?e, "giving up after retries");
+                        return Err(e);
+                    }
                     sleep(backoff).await;
                     backoff = std::cmp::min(backoff * 2, max_backoff());
                 }
@@ -256,7 +337,9 @@ impl BlinkClient {
         query quote($offerId: ID!) { quote(offerId: $offerId) { id amount currency expires } }
         "#;
         #[derive(Deserialize)]
-        struct Resp { quote: Quote }
+        struct Resp {
+            quote: Quote,
+        }
         let resp: Resp = self.gql(q, serde_json::json!({"offerId": offer})).await?;
         info!(amount=resp.quote.amount, currency=%resp.quote.currency, "offer quote received");
         Ok(resp.quote)
@@ -264,24 +347,44 @@ impl BlinkClient {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Wallet { pub id: String, #[serde(rename="walletCurrency")] pub wallet_currency: String, pub balance: i64 }
+pub struct Wallet {
+    pub id: String,
+    #[serde(rename = "walletCurrency")]
+    pub wallet_currency: String,
+    pub balance: i64,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ErrorDetail { pub message: String }
+pub struct ErrorDetail {
+    pub message: String,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InvoiceDetails {
-    #[serde(rename="paymentRequest")] pub payment_request: String,
-    #[serde(rename="paymentHash")] pub payment_hash: String,
-    #[serde(rename="paymentSecret")] pub payment_secret: String,
+    #[serde(rename = "paymentRequest")]
+    pub payment_request: String,
+    #[serde(rename = "paymentHash")]
+    pub payment_hash: String,
+    #[serde(rename = "paymentSecret")]
+    pub payment_secret: String,
     pub satoshis: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Payment { pub id: String, pub amount: i64, #[serde(rename="createdAt")] pub created_at: String }
+pub struct Payment {
+    pub id: String,
+    pub amount: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Quote { pub id: String, pub amount: i64, pub currency: String, pub expires: String }
+pub struct Quote {
+    pub id: String,
+    pub amount: i64,
+    pub currency: String,
+    pub expires: String,
+}
 
 #[cfg(test)]
 mod tests {
@@ -305,6 +408,7 @@ mod tests {
             tls_enable: false,
             tls_cert_path: "".into(),
             tls_key_path: "".into(),
+            ..crate::settings::Config::default()
         };
         BlinkClient::new(&cfg).expect("blink client")
     }
@@ -342,8 +446,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .respond_with(
-                ResponseTemplate::new(500)
-                    .set_body_json(json!({"errors":[{"message":"boom"}]})),
+                ResponseTemplate::new(500).set_body_json(json!({"errors":[{"message":"boom"}]})),
             )
             .mount(&server)
             .await;
@@ -468,7 +571,10 @@ mod tests {
 
         let client_err = mk_client(&server_err, "key", "wallet-xyz");
         let res = client_err.make_payment("bolt11-yyy").await;
-        assert!(res.is_err(), "GraphQL errors without data should yield error");
+        assert!(
+            res.is_err(),
+            "GraphQL errors without data should yield error"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -607,12 +713,19 @@ mod tests {
 
 // Backoff configuration separated for testability
 #[cfg(test)]
-fn initial_backoff() -> Duration { Duration::from_millis(10) }
+fn initial_backoff() -> Duration {
+    Duration::from_millis(10)
+}
 #[cfg(not(test))]
-fn initial_backoff() -> Duration { Duration::from_secs(1) }
+fn initial_backoff() -> Duration {
+    Duration::from_secs(1)
+}
 
 #[cfg(test)]
-fn max_backoff() -> Duration { Duration::from_millis(100) }
+fn max_backoff() -> Duration {
+    Duration::from_millis(100)
+}
 #[cfg(not(test))]
-fn max_backoff() -> Duration { Duration::from_secs(30) }
-
+fn max_backoff() -> Duration {
+    Duration::from_secs(30)
+}
