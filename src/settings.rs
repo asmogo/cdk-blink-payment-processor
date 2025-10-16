@@ -1,5 +1,9 @@
-use figment::{Figment, providers::{Format, Toml, Serialized}};
+use figment::{
+    providers::{Format, Serialized, Toml},
+    Figment,
+};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -11,6 +15,12 @@ pub struct Config {
     pub tls_enable: bool,
     pub tls_cert_path: String,
     pub tls_key_path: String,
+    #[serde(default = "default_keep_alive_interval", with = "humantime_serde")]
+    pub keep_alive_interval: Duration,
+    #[serde(default = "default_keep_alive_timeout", with = "humantime_serde")]
+    pub keep_alive_timeout: Duration,
+    #[serde(default = "default_max_connection_age", with = "humantime_serde")]
+    pub max_connection_age: Duration,
 }
 
 impl Default for Config {
@@ -23,6 +33,9 @@ impl Default for Config {
             tls_enable: false,
             tls_cert_path: "certs/server.crt".to_string(),
             tls_key_path: "certs/server.key".to_string(),
+            keep_alive_interval: default_keep_alive_interval(),
+            keep_alive_timeout: default_keep_alive_timeout(),
+            max_connection_age: default_max_connection_age(),
         }
     }
 }
@@ -30,7 +43,8 @@ impl Default for Config {
 impl Config {
     /// Load from config.toml (if present) and environment variables.
     /// Environment variables override file values.
-    /// Supported env keys: BLINK_API_URL, BLINK_API_KEY, BLINK_WALLET_ID, SERVER_PORT, TLS_ENABLE, TLS_CERT_PATH, TLS_KEY_PATH
+    /// Supported env keys: BLINK_API_URL, BLINK_API_KEY, BLINK_WALLET_ID, SERVER_PORT, TLS_ENABLE, TLS_CERT_PATH, TLS_KEY_PATH,
+    /// KEEP_ALIVE_INTERVAL, KEEP_ALIVE_TIMEOUT, MAX_CONNECTION_IDLE, MAX_CONNECTION_AGE, MAX_CONNECTION_AGE_GRACE
     pub fn load() -> Self {
         // 1) Start with defaults + config.toml only if it exists
         let base: Config = Default::default();
@@ -41,37 +55,82 @@ impl Config {
         let mut cfg: Config = fig.extract().unwrap_or_default();
 
         // 2) Overlay environment variables explicitly
-        if let Ok(v) = std::env::var("BLINK_API_URL")      { cfg.blink_api_url = v; }
-        if let Ok(v) = std::env::var("BLINK_API_KEY")      { cfg.blink_api_key = v; }
-        if let Ok(v) = std::env::var("BLINK_WALLET_ID")    { cfg.blink_wallet_id = v; }
-        if let Ok(v) = std::env::var("SERVER_PORT")        { cfg.server_port = v.parse().unwrap_or(cfg.server_port); }
-        if let Ok(v) = std::env::var("TLS_ENABLE")         { cfg.tls_enable = matches!(v.as_str(), "1"|"true"|"TRUE"|"yes"|"YES"); }
-        if let Ok(v) = std::env::var("TLS_CERT_PATH")      { cfg.tls_cert_path = v; }
-        if let Ok(v) = std::env::var("TLS_KEY_PATH")       { cfg.tls_key_path = v; }
+        if let Ok(v) = std::env::var("BLINK_API_URL") {
+            cfg.blink_api_url = v;
+        }
+        if let Ok(v) = std::env::var("BLINK_API_KEY") {
+            cfg.blink_api_key = v;
+        }
+        if let Ok(v) = std::env::var("BLINK_WALLET_ID") {
+            cfg.blink_wallet_id = v;
+        }
+        if let Ok(v) = std::env::var("SERVER_PORT") {
+            cfg.server_port = v.parse().unwrap_or(cfg.server_port);
+        }
+        if let Ok(v) = std::env::var("TLS_ENABLE") {
+            cfg.tls_enable = matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
+        }
+        if let Ok(v) = std::env::var("TLS_CERT_PATH") {
+            cfg.tls_cert_path = v;
+        }
+        if let Ok(v) = std::env::var("TLS_KEY_PATH") {
+            cfg.tls_key_path = v;
+        }
+        if let Ok(v) = std::env::var("KEEP_ALIVE_INTERVAL") {
+            cfg.keep_alive_interval = parse_duration_env(&v, cfg.keep_alive_interval);
+        }
+        if let Ok(v) = std::env::var("KEEP_ALIVE_TIMEOUT") {
+            cfg.keep_alive_timeout = parse_duration_env(&v, cfg.keep_alive_timeout);
+        }
+        if let Ok(v) = std::env::var("MAX_CONNECTION_AGE") {
+            cfg.max_connection_age = parse_duration_env(&v, cfg.max_connection_age);
+        }
 
         cfg
     }
 
-    pub fn from_env() -> Self { Self::load() }
+    pub fn from_env() -> Self {
+        Self::load()
+    }
 }
 
+fn parse_duration_env(value: &str, current: Duration) -> Duration {
+    humantime::parse_duration(value).unwrap_or(current)
+}
+
+fn default_keep_alive_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
+fn default_keep_alive_timeout() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_max_connection_age() -> Duration {
+    Duration::from_secs(1800)
+}
 
 #[cfg(test)]
 mod tests {
     use super::Config;
     use serial_test::serial;
     use std::{
-        env,
-        fs,
+        env, fs,
         path::{Path, PathBuf},
     };
+    use std::time::Duration;
 
     // Environment variable keys used by Config::load
-    const ENV_KEYS: [&str; 4] = [
+    const ENV_KEYS: [&str; 9] = [
         "BLINK_API_URL",
         "BLINK_API_KEY",
         "BLINK_WALLET_ID",
         "SERVER_PORT",
+        "KEEP_ALIVE_INTERVAL",
+        "KEEP_ALIVE_TIMEOUT",
+        "MAX_CONNECTION_IDLE",
+        "MAX_CONNECTION_AGE",
+        "MAX_CONNECTION_AGE_GRACE",
     ];
 
     // Guard to change current working directory and restore it on drop.
@@ -224,17 +283,26 @@ server_port = 1000
         write_config(&dir, toml_ok);
         env::set_var("SERVER_PORT", "not-a-number");
         let cfg = Config::load();
-        assert_eq!(cfg.server_port, 1000, "unparsable env should fallback to file value");
+        assert_eq!(
+            cfg.server_port, 1000,
+            "unparsable env should fallback to file value"
+        );
 
         // B) Env SERVER_PORT out-of-range for u16 -> also fallback to file value.
         env::set_var("SERVER_PORT", "70000"); // > u16::MAX
         let cfg = Config::load();
-        assert_eq!(cfg.server_port, 1000, "out-of-range env should fallback to file value");
+        assert_eq!(
+            cfg.server_port, 1000,
+            "out-of-range env should fallback to file value"
+        );
 
         // C) Negative env -> fallback
         env::set_var("SERVER_PORT", "-1");
         let cfg = Config::load();
-        assert_eq!(cfg.server_port, 1000, "negative env should fallback to file value");
+        assert_eq!(
+            cfg.server_port, 1000,
+            "negative env should fallback to file value"
+        );
 
         // D) Invalid server_port in TOML (-1) makes extraction fail and defaults used.
         let bad_toml = r#"
@@ -286,6 +354,9 @@ blink_api_key = "partial-key"
             tls_enable: true,
             tls_cert_path: "p.crt".into(),
             tls_key_path: "p.key".into(),
+            keep_alive_interval: Duration::from_secs(15),
+            keep_alive_timeout: Duration::from_secs(5),
+            max_connection_age: Duration::from_secs(900),
         };
         let json = serde_json::to_string(&cfg).expect("serialize config");
         let back: Config = serde_json::from_str(&json).expect("deserialize config");

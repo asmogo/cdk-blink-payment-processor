@@ -36,6 +36,12 @@ blink_api_url = "https://api.blink.sv/graphql"
 blink_api_key = "<your key>"
 blink_wallet_id = ""        # optional; default wallet used when empty
 server_port = 50051         # gRPC listen port
+
+# HTTP/2 keep-alive and connection age configuration (humantime durations)
+keep_alive_interval = "30s"
+keep_alive_timeout = "10s"
+max_connection_age = "30m"
+
 # TLS configuration
 # Enable TLS on the gRPC server. If true and the cert/key don't exist,
 # the server will generate a self-signed cert for localhost and write it
@@ -50,6 +56,11 @@ Environment variables override file values:
 - BLINK_API_KEY
 - BLINK_WALLET_ID
 - SERVER_PORT
+- KEEP_ALIVE_INTERVAL          # e.g. "45s"
+- KEEP_ALIVE_TIMEOUT           # e.g. "15s"
+- MAX_CONNECTION_IDLE          # e.g. "10m"
+- MAX_CONNECTION_AGE           # e.g. "1h"
+- MAX_CONNECTION_AGE_GRACE     # e.g. "2m"
 
 Example run with env:
 ```

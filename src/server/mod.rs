@@ -344,7 +344,7 @@ impl pb::cdk_payment_processor_server::CdkPaymentProcessor for PaymentProcessorS
                     if !status.eq_ignore_ascii_case("PAID") {
                         continue;
                     }
-                    if payment_hash.is_empty()  {
+                    if payment_hash.is_empty() {
                         continue;
                     }
                     let resp = pb::WaitIncomingPaymentResponse {

@@ -11,19 +11,17 @@ anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-futures = "0.3"
 futures-util = "0.3"
 http = "1"
-hyper = { version = "1", features = ["client", "http1"] }
 lightning-invoice = "0.30"
 prost = "0.13"
-prost-types = "0.13"
 figment = { version = "0.10", features = ["env", "toml"] }
+humantime = "2"
+humantime-serde = "1"
 
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -31,18 +29,14 @@ tonic = { version = "0.12", features = ["transport", "tls"] }
 tonic-reflection = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-url = "2"
 rcgen = "0.12"
 
 [build-dependencies]
 tonic-build = "0.12"
-prost-build = "0.13"
 
 [dev-dependencies]
 wiremock = "0.6"
 proptest = "1"
-proptest-derive = "0.4"
-insta = { version = "1", features = ["json"] }
 tungstenite = "0.21"
 serial_test = "2"
 
