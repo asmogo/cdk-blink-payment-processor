@@ -297,7 +297,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     fn mk_client(server: &MockServer, api_key: &str, wallet_id: &str) -> BlinkClient {
-        let cfg = crate::settings::Config {
+        let cfg = Config {
             blink_api_url: format!("{}/graphql", server.uri()),
             blink_api_key: api_key.to_string(),
             blink_wallet_id: wallet_id.to_string(),

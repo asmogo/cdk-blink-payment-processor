@@ -21,6 +21,11 @@ async fn main() -> Result<()> {
     // Load configuration from environment
     let cfg = settings::Config::from_env();
 
+    if cfg.blink_api_key.is_empty() {
+        tracing::error!("BLINK_API_KEY not set; exiting");
+        return Ok(());
+    }
+
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.server_port).parse()?;
 
     let svc = PaymentProcessorService::try_new(cfg.clone()).await?;
