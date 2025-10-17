@@ -1,6 +1,7 @@
 # CDK Blink Payment Processor (Rust)
 
 A gRPC service that bridges the CDK payment processor proto to Blink’s GraphQL and WebSocket APIs. It exposes a single gRPC server that:
+
 - Creates incoming Lightning invoices (BOLT11) via Blink
 - Produces payment quotes
 - Sends outgoing payments
@@ -8,6 +9,7 @@ A gRPC service that bridges the CDK payment processor proto to Blink’s GraphQL
 - Streams incoming payment updates over a resilient WebSocket subscription
 
 Core modules:
+
 - Server service implementation: [src/server/mod.rs](src/server/mod.rs)
 - Entry point: [src/main.rs](src/main.rs)
 - Blink GraphQL client: [src/blink/rest.rs](src/blink/rest.rs)
@@ -31,6 +33,7 @@ Status: core RPCs and streaming implemented. No persistent database.
 Configuration can be provided via a config file at the repository root or environment variables. Default values are in [src/settings.rs](src/settings.rs).
 
 Example [config.toml](config.toml):
+
 ```toml
 blink_api_url = "https://api.blink.sv/graphql"
 blink_api_key = "<your key>"
@@ -52,17 +55,17 @@ tls_key_path = "certs/server.key"
 ```
 
 Environment variables override file values:
+
 - BLINK_API_URL
 - BLINK_API_KEY
 - BLINK_WALLET_ID
 - SERVER_PORT
-- KEEP_ALIVE_INTERVAL          # e.g. "45s"
-- KEEP_ALIVE_TIMEOUT           # e.g. "15s"
-- MAX_CONNECTION_IDLE          # e.g. "10m"
-- MAX_CONNECTION_AGE           # e.g. "1h"
-- MAX_CONNECTION_AGE_GRACE     # e.g. "2m"
+- KEEP_ALIVE_INTERVAL # e.g. "45s"
+- KEEP_ALIVE_TIMEOUT # e.g. "15s"
+- MAX_CONNECTION_AGE # e.g. "1h"
 
 Example run with env:
+
 ```
 BLINK_API_URL=https://api.blink.sv/graphql \
 BLINK_API_KEY=your_api_key \
@@ -80,6 +83,7 @@ The build script compiles the proto during build using tonic-build (prost).
 - Build script: [build.rs](build.rs)
 
 Build release:
+
 ```
 cargo build --release
 ```
@@ -97,6 +101,7 @@ RUST_LOG=info cargo run --release
 Service: cdk_payment_processor.CdkPaymentProcessor (generated into [src/pb.rs](src/pb.rs) from [src/payment_processor.proto](src/payment_processor.proto))
 
 RPCs:
+
 - GetSettings(EmptyRequest) -> SettingsResponse
 - CreatePayment(CreatePaymentRequest) -> CreatePaymentResponse
 - GetPaymentQuote(PaymentQuoteRequest) -> PaymentQuoteResponse
@@ -106,6 +111,7 @@ RPCs:
 - WaitIncomingPayment(EmptyRequest) -> stream WaitIncomingPaymentResponse
 
 Notes:
+
 - Currency unit is typically "sat".
 - PaymentIdentifier supports types: PAYMENT_HASH, PAYMENT_ID, etc. When sending JSON via grpcurl, set the enum name (e.g., "PAYMENT_HASH") and provide the corresponding field (hash or id).
 
@@ -114,11 +120,13 @@ Notes:
 All examples assume a local server on 127.0.0.1:50051 with plaintext gRPC.
 
 - GetSettings
+
 ```
 grpcurl -plaintext -d '{}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/GetSettings
 ```
 
 - CreatePayment (BOLT11 invoice for 1000 sat)
+
 ```
 grpcurl -plaintext -d '{
   "unit": "sat",
@@ -127,6 +135,7 @@ grpcurl -plaintext -d '{
 ```
 
 - GetPaymentQuote (for a BOLT11 invoice)
+
 ```
 grpcurl -plaintext -d '{
   "request": "lnbc1...",
@@ -136,6 +145,7 @@ grpcurl -plaintext -d '{
 ```
 
 - MakePayment (send a BOLT11 invoice)
+
 ```
 grpcurl -plaintext -d '{
   "payment_options": { "bolt11": { "bolt11": "lnbc1..." } }
@@ -143,6 +153,7 @@ grpcurl -plaintext -d '{
 ```
 
 - CheckIncomingPayment by payment hash
+
 ```
 grpcurl -plaintext -d '{
   "request_identifier": { "type": "PAYMENT_HASH", "hash": "000abc..." }
@@ -150,6 +161,7 @@ grpcurl -plaintext -d '{
 ```
 
 - CheckOutgoingPayment by payment id or hash
+
 ```
 # By payment id
 grpcurl -plaintext -d '{
@@ -163,6 +175,7 @@ grpcurl -plaintext -d '{
 ```
 
 - WaitIncomingPayment (server streaming)
+
 ```
 grpcurl -plaintext -d '{}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/WaitIncomingPayment
 ```
@@ -170,7 +183,8 @@ grpcurl -plaintext -d '{}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProce
 ## Blink integrations
 
 HTTP GraphQL (via [src/blink/rest.rs](src/blink/rest.rs)):
-- Base URL: blink_api_url (e.g., https://api.blink.sv/graphql)
+
+- Base URL: blink_api_url (e.g., <https://api.blink.sv/graphql>)
 - Headers: Content-Type: application/json, X-API-KEY: <your_api_key>
 - Operations used:
   - query me { defaultAccount { wallets { id walletCurrency balance } } }
@@ -182,11 +196,12 @@ HTTP GraphQL (via [src/blink/rest.rs](src/blink/rest.rs)):
   - query quote(offerId: ID!)
 
 WebSocket GraphQL (via [src/blink/ws.rs](src/blink/ws.rs)):
-- Derived endpoint: replace https://api.blink.sv/graphql with wss://ws.blink.sv/graphql
+
+- Derived endpoint: replace <https://api.blink.sv/graphql> with wss://ws.blink.sv/graphql
 - Subprotocol: graphql-transport-ws
 - Handshake:
   - Send connection_init with payload: { "X-API-KEY": "<your_api_key>" }
-  - Then subscribe with: subscription myUpdates { myUpdates { errors { message } me { id } update { __typename ... on LnUpdate { status transaction { id direction settlementAmount initiationVia { __typename ... on InitiationViaLn { paymentRequest paymentHash } } } } } } }
+  - Then subscribe with: subscription myUpdates { myUpdates { errors { message } me { id } update { **typename ... on LnUpdate { status transaction { id direction settlementAmount initiationVia {**typename ... on InitiationViaLn { paymentRequest paymentHash } } } } } } }
 - The service reconnects with exponential backoff and responds to pings. Incoming payloads are translated to WaitIncomingPaymentResponse.
 
 ## Protobuf and code generation
