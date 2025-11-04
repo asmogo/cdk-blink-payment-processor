@@ -1,3 +1,13 @@
+//! CDK Blink Payment Processor - gRPC Server Entry Point
+//!
+//! This module initializes and starts the gRPC server that bridges CDK payment processors
+//! to Blink's GraphQL and WebSocket APIs. It handles:
+//! - Configuration loading from environment
+//! - TLS/SSL certificate management (auto-generation if needed)
+//! - gRPC reflection setup for service discovery
+//! - HTTP/2 keepalive configuration
+//! - Server startup and shutdown
+
 mod blink;
 mod pb;
 mod server;
@@ -13,36 +23,50 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Logging
+    // Initialize structured logging with environment filter (default: info level)
+    // This allows controlling log levels via RUST_LOG environment variable
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
 
-    // Load configuration from environment
+    // Load configuration from multiple sources in priority order:
+    // 1. Environment variables (highest priority)
+    // 2. config.toml file (if present)
+    // 3. Hardcoded defaults (lowest priority)
     let cfg = settings::Config::from_env();
 
+    // Validate required configuration: BLINK_API_KEY must be set
+    // This prevents starting the server with invalid configuration
     if cfg.blink_api_key.is_empty() {
         tracing::error!("BLINK_API_KEY not set; exiting");
         return Ok(());
     }
 
+    // Parse server listen address from configuration
+    // Format: "0.0.0.0:{port}" to listen on all interfaces
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.server_port).parse()?;
 
+    // Initialize the gRPC service implementation
+    // This creates BlinkClient internally and validates connectivity to Blink API
     let svc = PaymentProcessorService::try_new(cfg.clone()).await?;
 
-    // Enable gRPC reflection so tools like grpcurl can discover services and methods
+    // Enable gRPC reflection for service discovery
+    // This allows tools like grpcurl to list available services and methods without
+    // additional configuration: grpcurl -plaintext localhost:50051 list
     let reflection_svc = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(pb::FILE_DESCRIPTOR_SET)
         .build_v1()?; // use v1 to satisfy grpcurl reflection
 
-    // Build server, optionally with TLS
+    // Build the gRPC server with HTTP/2 keepalive settings
+    // These settings prevent connections from being dropped due to NAT/firewall inactivity
     let mut builder = Server::builder()
         .http2_keepalive_interval(Some(cfg.keep_alive_interval))
         .http2_keepalive_timeout(Some(cfg.keep_alive_timeout))
         .max_connection_age(cfg.max_connection_age);
 
+    // Configure TLS/SSL if enabled
     if cfg.tls_enable {
-        // Ensure cert files exist, generate self-signed if missing
+        // Construct paths for certificate, key, and CA files
         let cert_path = Path::new(&cfg.tls_cert_path);
         let key_path = Path::new(&cfg.tls_key_path);
         let ca_path = {
@@ -54,11 +78,14 @@ async fn main() -> Result<()> {
             cert_path.with_file_name(ca_file)
         };
 
+        // Auto-generate self-signed certificates if not present
+        // Useful for development/testing, but production should use CA-signed certificates
         if !cert_path.exists() || !key_path.exists() {
             tracing::warn!(
                 cert=%cert_path.display(), key=%key_path.display(),
                 "TLS enabled but certificate or key not found; generating CA and server certificate"
             );
+            // Create directories for certificate files
             if let Some(parent) = cert_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
@@ -69,7 +96,7 @@ async fn main() -> Result<()> {
                 let _ = fs::create_dir_all(parent);
             }
 
-            // Generate a simple CA certificate
+            // Generate self-signed CA certificate for development/testing
             let mut ca_params = rcgen::CertificateParams::default();
             ca_params
                 .distinguished_name
@@ -82,7 +109,8 @@ async fn main() -> Result<()> {
             ];
             let ca_cert = rcgen::Certificate::from_params(ca_params).expect("generate CA cert");
 
-            // Generate a server certificate signed by the CA
+            // Generate server certificate signed by the CA
+            // Includes both localhost and 127.0.0.1 for local testing
             let mut server_params =
                 rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]);
             server_params
@@ -103,19 +131,21 @@ async fn main() -> Result<()> {
             let server_key_pem = server_cert.serialize_private_key_pem();
             let ca_cert_pem = ca_cert.serialize_pem().expect("serialize ca pem");
 
-            // Write files
+            // Write certificate and key files to disk
             fs::write(&cert_path, server_cert_pem).expect("write server cert pem");
             fs::write(&key_path, server_key_pem).expect("write server key pem");
             fs::write(&ca_path, ca_cert_pem).expect("write ca cert pem");
         }
 
-        // Load server cert + chain (append CA so clients receive the issuer)
+        // Load server certificate and append CA certificate to form a certificate chain
+        // This ensures clients receive the CA issuer for certificate validation
         let mut chain_pem = fs::read(&cfg.tls_cert_path)?;
         if let Ok(ca_pem) = fs::read(&ca_path) {
             chain_pem.extend_from_slice(b"\n");
             chain_pem.extend_from_slice(&ca_pem);
         }
 
+        // Load private key and create TLS identity
         let key = fs::read(&cfg.tls_key_path)?;
         let identity = Identity::from_pem(chain_pem, key);
         builder = builder.tls_config(ServerTlsConfig::new().identity(identity))?;
@@ -130,6 +160,8 @@ async fn main() -> Result<()> {
         tracing::info!(addr=%addr, "Starting plaintext gRPC server");
     }
 
+    // Add reflection service and payment processor service to the server
+    // Then bind to the configured address and start listening for incoming connections
     builder
         .add_service(reflection_svc)
         .add_service(
