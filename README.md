@@ -1,6 +1,6 @@
 # CDK Blink Payment Processor (Rust)
 
-A gRPC service that bridges the CDK payment processor proto to Blink’s GraphQL and WebSocket APIs. It exposes a single gRPC server that:
+A gRPC service that bridges the [Cashu Development Kit (CDK)](https://github.com/cashubtc/cdk) payment processor proto to Blink’s GraphQL and WebSocket APIs. It exposes a single gRPC server that:
 - Creates incoming Lightning invoices (BOLT11) via Blink
 - Produces payment quotes
 - Sends outgoing payments
@@ -16,7 +16,16 @@ Core modules:
 - Protobuf build script: [build.rs](build.rs)
 - Configuration loader: [src/settings.rs](src/settings.rs)
 
-Status: core RPCs and streaming implemented. No persistent database.
+
+### Key Features
+
+- **Lightning Network Integration**: Create and send BOLT11 invoices via Blink's API
+- **Real-time Payment Streaming**: WebSocket-based incoming payment updates with automatic reconnection
+- **Flexible Payment Quotes**: Get payment quotes before execution
+- **Payment Status Tracking**: Check status of incoming and outgoing payments
+- **TLS Support**: Optional TLS encryption for production deployments
+- **Configurable**: Environment variables and config file support
+- **gRPC Reflection**: Built-in service discovery for tools like `grpcurl`
 
 ## Requirements
 
