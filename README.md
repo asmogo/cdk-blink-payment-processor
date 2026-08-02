@@ -1,82 +1,76 @@
-# CDK Blink Payment Processor (Rust)
+# CDK Blink Payment Processor
 
-A gRPC service that bridges the [Cashu Development Kit (CDK)](https://github.com/cashubtc/cdk) payment processor proto to Blink’s GraphQL and WebSocket APIs. It exposes a single gRPC server that:
+A [CDK payment processor](https://github.com/cashubtc/cdk-payment-processors) that connects a
+[Cashu Development Kit (CDK)](https://github.com/cashubtc/cdk) mint to Blink's Lightning
+infrastructure. It implements the CDK `MintPayment` interface (exposed over gRPC by
+[`cdk-payment-processor`](https://crates.io/crates/cdk-payment-processor)) on top of Blink's
+GraphQL and WebSocket APIs:
 
 - Creates incoming Lightning invoices (BOLT11) via Blink
-- Produces payment quotes
+- Produces payment quotes with real routing-fee probes
 - Sends outgoing payments
 - Checks incoming/outgoing payment status
 - Streams incoming payment updates over a resilient WebSocket subscription
 
 Core modules:
 
-- Server service implementation: [src/server/mod.rs](src/server/mod.rs)
+- `MintPayment` backend: [src/backend.rs](src/backend.rs)
 - Entry point: [src/main.rs](src/main.rs)
 - Blink GraphQL client: [src/blink/rest.rs](src/blink/rest.rs)
 - Blink WebSocket client: [src/blink/ws.rs](src/blink/ws.rs)
-- Protobuf definition: [src/payment_processor.proto](src/payment_processor.proto)
-- Protobuf build script: [build.rs](build.rs)
 - Configuration loader: [src/settings.rs](src/settings.rs)
-
 
 ### Key Features
 
-- **Lightning Network Integration**: Create and send BOLT11 invoices via Blink's API
+- **Lightning Network Integration**: Create and pay BOLT11 invoices via Blink's API
 - **Real-time Payment Streaming**: WebSocket-based incoming payment updates with automatic reconnection
-- **Flexible Payment Quotes**: Get payment quotes before execution
-- **Payment Status Tracking**: Check status of incoming and outgoing payments
+- **Fee Probing**: Quotes use Blink's `lnInvoiceFeeProbe` for accurate routing fees
+- **Payment Status Tracking**: Check status of incoming and outgoing payments by payment hash
 - **TLS Support**: Optional TLS encryption for production deployments
 - **Configurable**: Environment variables and config file support
-- **gRPC Reflection**: Built-in service discovery for tools like `grpcurl`
 
 ## Requirements
 
 - Rust (stable toolchain) and Cargo
-- protoc (Protocol Buffers compiler) available on PATH
-  - macOS: brew install protobuf
-  - Linux: install distro package (e.g., apt-get install -y protobuf-compiler)
-- Network access to Blink API
+- Network access to the Blink API
+- A Blink API key (<https://dashboard.blink.sv>)
 
 ## Setup and Configuration
 
-Configuration can be provided via a config file at the repository root or environment variables. Default values are in [src/settings.rs](src/settings.rs).
+Configuration can be provided via a `config.toml` file in the working directory or via
+environment variables. Environment variables override file values.
 
 Example [config.toml](config.toml):
 
 ```toml
-blink_api_url = "https://api.blink.sv/graphql"
-blink_api_key = "<your key>"
-blink_wallet_id = ""        # optional; default wallet used when empty
-server_port = 50051         # gRPC listen port
+address = "0.0.0.0"
+port = 50051
 
-# HTTP/2 keep-alive and connection age configuration (humantime durations)
-keep_alive_interval = "30s"
-keep_alive_timeout = "10s"
-max_connection_age = "30m"
+# TLS configuration (paths to PEM files)
+# tls_enable = false
+# tls_cert_path = "certs/server.crt"
+# tls_key_path = "certs/server.key"
 
-# TLS configuration
-# Enable TLS on the gRPC server. If true and the cert/key don't exist,
-# the server will generate a self-signed cert for localhost and write it
-# to the given paths.
-tls_enable = false
-tls_cert_path = "certs/server.crt"
-tls_key_path = "certs/server.key"
+[backend]
+api_url = "https://api.blink.sv/graphql"
+api_key = "<your key>"
+wallet_id = ""        # optional; default BTC wallet is resolved when empty
 ```
 
-Environment variables override file values:
+Environment variables:
 
-- BLINK_API_URL
-- BLINK_API_KEY
-- BLINK_WALLET_ID
-- SERVER_PORT
-- KEEP_ALIVE_INTERVAL # e.g. "45s"
-- KEEP_ALIVE_TIMEOUT # e.g. "15s"
-- MAX_CONNECTION_AGE # e.g. "1h"
+- `BLINK_API_URL`
+- `BLINK_API_KEY` (required)
+- `BLINK_WALLET_ID`
+- `SERVER_ADDRESS`
+- `SERVER_PORT`
+- `TLS_ENABLE` (`true`/`false`)
+- `TLS_CERT_PATH`
+- `TLS_KEY_PATH`
 
 Example run with env:
 
 ```
-BLINK_API_URL=https://api.blink.sv/graphql \
 BLINK_API_KEY=your_api_key \
 BLINK_WALLET_ID=your_wallet_id_or_empty \
 SERVER_PORT=50051 \
@@ -86,148 +80,77 @@ cargo run --release
 
 ## Build
 
-The build script compiles the proto during build using tonic-build (prost).
-
-- Proto: [src/payment_processor.proto](src/payment_processor.proto)
-- Build script: [build.rs](build.rs)
-
-Build release:
-
 ```
 cargo build --release
 ```
 
 ## Run
 
-By default the server listens on 0.0.0.0:SERVER_PORT.
+By default the server listens on `0.0.0.0:50051` (plaintext).
 
 ```
 RUST_LOG=info cargo run --release
 ```
 
-## gRPC API surface
+## How it works
 
-Service: cdk_payment_processor.CdkPaymentProcessor (generated into [src/pb.rs](src/pb.rs) from [src/payment_processor.proto](src/payment_processor.proto))
+The processor does not implement the gRPC service itself. Instead,
+[src/backend.rs](src/backend.rs) implements the
+[`MintPayment`](https://docs.rs/cdk-common/latest/cdk_common/payment/trait.MintPayment.html)
+trait from `cdk-common`, and [src/main.rs](src/main.rs) exposes it through
+`PaymentProcessorServer` from the `cdk-payment-processor` crate, which handles the gRPC
+protocol (including the `x-cdk-protocol-version` handshake) for all CDK payment processors.
 
-RPCs:
+Supported payment options:
 
-- GetSettings(EmptyRequest) -> SettingsResponse
-- CreatePayment(CreatePaymentRequest) -> CreatePaymentResponse
-- GetPaymentQuote(PaymentQuoteRequest) -> PaymentQuoteResponse
-- MakePayment(MakePaymentRequest) -> MakePaymentResponse
-- CheckIncomingPayment(CheckIncomingPaymentRequest) -> CheckIncomingPaymentResponse
-- CheckOutgoingPayment(CheckOutgoingPaymentRequest) -> MakePaymentResponse
-- WaitIncomingPayment(EmptyRequest) -> stream WaitIncomingPaymentResponse
+- **BOLT11** only, unit `sat`. BOLT12, onchain, and custom payment methods are declared as
+  unsupported in `GetSettings`.
+- Fee quotes use Blink's `lnInvoiceFeeProbe`; if the probe fails, a conservative estimate
+  (1% of the amount, min 1 sat) is returned.
+- `MakePayment` maps Blink statuses to melt quote states (`SUCCESS` → `PAID`,
+  `PENDING` → `PENDING`, `FAILURE` → `FAILED`) and returns the payment preimage as the
+  payment proof when available.
 
-Notes:
-
-- Currency unit is typically "sat".
-- PaymentIdentifier supports types: PAYMENT_HASH, PAYMENT_ID, etc. When sending JSON via grpcurl, set the enum name (e.g., "PAYMENT_HASH") and provide the corresponding field (hash or id).
-
-## Usage examples (grpcurl)
-
-All examples assume a local server on 127.0.0.1:50051 with plaintext gRPC.
-
-- GetSettings
-
-```
-grpcurl -plaintext -d '{}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/GetSettings
-```
-
-- CreatePayment (BOLT11 invoice for 1000 sat)
-
-```
-grpcurl -plaintext -d '{
-  "unit": "sat",
-  "options": { "bolt11": { "description": "test invoice", "amount": 1000, "unix_expiry": 300 } }
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/CreatePayment
-```
-
-- GetPaymentQuote (for a BOLT11 invoice)
-
-```
-grpcurl -plaintext -d '{
-  "request": "lnbc1...",
-  "unit": "sat",
-  "request_type": "BOLT11_INVOICE"
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/GetPaymentQuote
-```
-
-- MakePayment (send a BOLT11 invoice)
-
-```
-grpcurl -plaintext -d '{
-  "payment_options": { "bolt11": { "bolt11": "lnbc1..." } }
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/MakePayment
-```
-
-- CheckIncomingPayment by payment hash
-
-```
-grpcurl -plaintext -d '{
-  "request_identifier": { "type": "PAYMENT_HASH", "hash": "000abc..." }
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/CheckIncomingPayment
-```
-
-- CheckOutgoingPayment by payment id or hash
-
-```
-# By payment id
-grpcurl -plaintext -d '{
-  "request_identifier": { "type": "PAYMENT_ID", "id": "payment-id-123" }
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/CheckOutgoingPayment
-
-# By payment hash
-grpcurl -plaintext -d '{
-  "request_identifier": { "type": "PAYMENT_HASH", "hash": "000abc..." }
-}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/CheckOutgoingPayment
-```
-
-- WaitIncomingPayment (server streaming)
-
-```
-grpcurl -plaintext -d '{}' 127.0.0.1:50051 cdk_payment_processor.CdkPaymentProcessor/WaitIncomingPayment
-```
-
-## Blink integrations
+## Blink integration
 
 HTTP GraphQL (via [src/blink/rest.rs](src/blink/rest.rs)):
 
-- Base URL: blink_api_url (e.g., <https://api.blink.sv/graphql>)
-- Headers: Content-Type: application/json, X-API-KEY: <your_api_key>
+- Base URL: `BLINK_API_URL` (e.g., <https://api.blink.sv/graphql>)
+- Headers: `Content-Type: application/json`, `X-API-KEY: <your_api_key>`
 - Operations used:
-  - query me { defaultAccount { wallets { id walletCurrency balance } } }
-  - mutation lnInvoiceCreate(input: { walletId, amount, memo })
-  - mutation lnInvoicePaymentSend(input: { walletId, paymentRequest, memo })
-  - query lnInvoicePaymentStatusByPaymentRequest(input: { paymentRequest })
-  - query lnInvoicePaymentStatusByHash(input: { paymentHash })
-  - query payment(id: ID!)
-  - query quote(offerId: ID!)
+  - `query me { defaultAccount { wallets { id walletCurrency balance } } }`
+  - `mutation lnInvoiceCreate(input: { walletId, amount, memo })`
+  - `mutation lnInvoiceFeeProbe(input: { walletId, paymentRequest })`
+  - `mutation lnInvoicePaymentSend(input: { walletId, paymentRequest, memo })`
+  - `query lnInvoicePaymentStatusByPaymentRequest(input: { paymentRequest })`
+  - `query lnInvoicePaymentStatusByHash(input: { paymentHash })`
 
 WebSocket GraphQL (via [src/blink/ws.rs](src/blink/ws.rs)):
 
-- Derived endpoint: replace <https://api.blink.sv/graphql> with wss://ws.blink.sv/graphql
-- Subprotocol: graphql-transport-ws
+- Derived endpoint: replace `https://api.blink.sv/graphql` with `wss://ws.blink.sv/graphql`
+- Subprotocol: `graphql-transport-ws`
 - Handshake:
-  - Send connection_init with payload: { "X-API-KEY": "<your_api_key>" }
-  - Then subscribe with: subscription myUpdates { myUpdates { errors { message } me { id } update { **typename ... on LnUpdate { status transaction { id direction settlementAmount initiationVia {**typename ... on InitiationViaLn { paymentRequest paymentHash } } } } } } }
-- The service reconnects with exponential backoff and responds to pings. Incoming payloads are translated to WaitIncomingPaymentResponse.
+  - Send `connection_init` with payload `{ "X-API-KEY": "<your_api_key>" }`
+  - Then subscribe with `subscription myUpdates { myUpdates { ... update { ... on LnUpdate { status transaction { id direction settlementAmount initiationVia { ... on InitiationViaLn { paymentRequest paymentHash } } } } } } }`
+- The client reconnects with exponential backoff and answers ping/pong keep-alives. Paid
+  updates are translated into CDK `PaymentReceived` events.
 
-## Protobuf and code generation
+## Connecting a mint
 
-- The protobuf schema is in [src/payment_processor.proto](src/payment_processor.proto).
-- [build.rs](build.rs) runs tonic-build to generate server and client code at build time.
-- The generated Rust module is included from [src/pb.rs](src/pb.rs).
-- The gRPC server is started in [src/main.rs](src/main.rs) and the service implementation lives in [src/server/mod.rs](src/server/mod.rs).
+Point `cdk-mintd` at this processor as its Lightning backend (gRPC payment processor),
+using the same listen address/port and matching TLS settings. The mint and the processor
+must agree on the CDK payment processor protocol version (handled automatically via the
+`x-cdk-protocol-version` header).
 
 ## Development notes
 
-- Logging uses tracing; configure with RUST_LOG (e.g., RUST_LOG=info).
-- Configuration precedence: defaults -> config.toml -> environment variables, as implemented in [src/settings.rs](src/settings.rs).
-- Invoice decoding uses lightning-invoice to derive amounts when needed.
-- No persistent storage; all state is in-memory and derived from Blink.
+- Logging uses `tracing`; configure with `RUST_LOG` (e.g., `RUST_LOG=info`).
+- Configuration precedence: defaults → `config.toml` → environment variables.
+- No persistent storage; all state is derived from Blink at request time.
+- Run tests with `cargo test` (unit tests stub the Blink API with wiremock).
 
 ## Security
 
 - Never commit real API keys. Use environment variables or a local, untracked config.toml.
 - Restrict network access appropriately and run behind a firewall when exposing the gRPC port.
+- Enable TLS (`TLS_ENABLE=true` with valid cert/key) for any non-localhost deployment.

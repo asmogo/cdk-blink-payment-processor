@@ -1,21 +1,7 @@
-//! Blink GraphQL API Client
+//! Blink GraphQL API client.
 //!
-//! This module provides a high-level client for communicating with the Blink GraphQL API.
-//! It handles:
-//! - Invoice creation (incoming payments)
-//! - Payment sending (outgoing payments)
-//! - Status queries (checking payment state)
-//! - Wallet management (selecting target wallet)
-//! - GraphQL request/response marshalling
-//!
-//! ## Architecture
-//! The client uses reqwest for HTTP communication and maintains an authenticated session
-//! with the Blink API. All methods are instrumented with tracing for observability.
-//!
-//! ## Error Handling
-//! All methods return `Result<T>` (anyhow::Result). GraphQL errors are logged but not
-//! distinguished from network errors at the type level. Check logs for detailed GraphQL
-//! error messages.
+//! Handles invoice creation, outgoing payments, fee probing, and status
+//! queries against Blink's GraphQL endpoint.
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::{Client, Url};
@@ -25,16 +11,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::settings::Config;
+use crate::settings::BackendConfig;
 
-/// HTTP client for Blink GraphQL API communication
-///
-/// This struct manages authentication and connection to Blink's GraphQL endpoint.
-/// It provides methods for creating/querying invoices and sending payments.
-///
-/// # Clone
-/// This struct is cloneable. Each clone shares the same underlying HTTP client
-/// (reqwest::Client is internally Arc-wrapped).
+/// HTTP client for the Blink GraphQL API
 #[derive(Clone)]
 pub struct BlinkClient {
     http: Client,
@@ -44,26 +23,15 @@ pub struct BlinkClient {
 }
 
 impl BlinkClient {
-    /// Create a new BlinkClient from configuration
-    ///
-    /// # Parameters
-    /// - `cfg`: Configuration containing API URL, API key, and optional wallet ID
-    ///
-    /// # Returns
-    /// Result<Self> - Error if URL parsing fails or HTTP client can't be created
-    ///
-    /// # Note
-    /// The wallet_id from config can be empty. In that case, get_default_wallet() will
-    /// be called to determine which wallet to use for operations.
-    pub fn new(cfg: &Config) -> Result<Self> {
-        // Create HTTP client with 15-second timeout to prevent hanging requests
+    /// Create a new BlinkClient from backend configuration
+    pub fn new(cfg: &BackendConfig) -> Result<Self> {
         let http = Client::builder().timeout(Duration::from_secs(15)).build()?;
-        let base_url = Url::parse(&cfg.blink_api_url)?;
+        let base_url = Url::parse(&cfg.api_url)?;
         Ok(Self {
             http,
             base_url,
-            api_key: cfg.blink_api_key.clone(),
-            wallet_id: cfg.blink_wallet_id.clone(),
+            api_key: cfg.api_key.clone(),
+            wallet_id: cfg.wallet_id.clone(),
         })
     }
 
@@ -72,38 +40,24 @@ impl BlinkClient {
         &self.base_url
     }
 
-    /// Get the Blink API key as a string reference
+    /// Get the Blink API key
     pub fn api_key_str(&self) -> &str {
         &self.api_key
     }
 
-    /// Send a GraphQL query to Blink and deserialize the response
-    ///
-    /// This is an internal helper method that handles:
-    /// - Request formatting with authentication header
-    /// - Response parsing and error handling
-    /// - Logging of success/failure
-    ///
-    /// # Parameters
-    /// - `query`: GraphQL query string
-    /// - `variables`: JSON object with query variables
-    ///
-    /// # Returns
-    /// - Ok(T): Successfully parsed GraphQL data
-    /// - Err: Network error, parsing error, or GraphQL error
-    ///
-    /// # Important
-    /// GraphQL errors from Blink are logged but don't prevent the response from being
-    /// parsed. Always check logs for error details.
+    /// Override the wallet id (used after resolving the default wallet)
+    pub fn set_wallet_id(&mut self, wallet_id: String) {
+        self.wallet_id = wallet_id;
+    }
+
+    /// Send a GraphQL query to Blink and deserialize the `data` field
     #[instrument(skip(self, variables, query), fields(url=%self.base_url))]
     async fn gql<T: for<'de> Deserialize<'de>>(&self, query: &str, variables: Value) -> Result<T> {
-        // Build GraphQL request body with query and variables
         let body = serde_json::json!({
             "query": query,
             "variables": variables,
         });
-        info!("blink.gql request sent");
-        // Send POST request to Blink GraphQL endpoint with API key authentication
+        debug!("blink.gql request sent");
         let res = self
             .http
             .post(self.base_url.clone())
@@ -122,11 +76,9 @@ impl BlinkClient {
             e
         })?;
         debug!(?status, body_len = txt.len(), "blink.gql response received");
-        // Log non-200 responses with first 200 chars of body for debugging
         if !status.is_success() {
             error!(?status, body_snippet = %txt.chars().take(200).collect::<String>(), "blink.gql non-200 status");
         }
-        // Parse GraphQL response (which includes both data and errors fields)
         #[derive(Deserialize)]
         struct GraphQL<T> {
             data: Option<T>,
@@ -138,29 +90,31 @@ impl BlinkClient {
         }
         let parsed: GraphQL<T> =
             serde_json::from_str(&txt).with_context(|| format!("decode gql response: {}", txt))?;
-        if let Some(errs) = parsed.errors.as_ref() {
-            if !errs.is_empty() {
-                error!(errors=?errs, "blink.gql returned errors");
+        match parsed.data {
+            Some(data) => {
+                if let Some(errs) = parsed.errors.as_ref().filter(|e| !e.is_empty()) {
+                    warn!(errors=?errs, "blink.gql returned partial errors");
+                }
+                Ok(data)
+            }
+            None => {
+                let messages = parsed
+                    .errors
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|e| e.message)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if messages.is_empty() {
+                    Err(anyhow!("missing data"))
+                } else {
+                    Err(anyhow!(messages))
+                }
             }
         }
-        // Extract data from response or error if missing
-        parsed.data.ok_or_else(|| anyhow!("missing data"))
     }
 
-    /// Get the default wallet for the authenticated user
-    ///
-    /// This queries Blink to fetch available wallets and returns the first BTC wallet
-    /// found (or the first wallet if no BTC wallet exists).
-    ///
-    /// # Returns
-    /// - Ok(Wallet): The selected wallet with ID and currency
-    /// - Err: If no wallets found or query fails
-    ///
-    /// # Strategy
-    /// 1. Query user's account for available wallets
-    /// 2. Prefer BTC wallets (for Lightning Network)
-    /// 3. Fallback to first available wallet
-    /// 4. Return error if no wallets exist
+    /// Get the default BTC wallet of the authenticated account
     #[instrument(skip(self), fields(url=%self.base_url))]
     pub async fn get_default_wallet(&self) -> Result<Wallet> {
         info!("querying default wallet");
@@ -180,57 +134,38 @@ impl BlinkClient {
         struct DefaultAccount {
             wallets: Vec<Wallet>,
         }
-        // Query Blink for user's wallets
         let resp: Resp = self.gql(q, serde_json::json!({})).await?;
         let wallets = resp.me.default_account.wallets;
         info!(count = wallets.len(), "wallets fetched");
-        // Try to select a BTC wallet (for Lightning Network payments)
         if let Some(w) = wallets.iter().find(|w| w.wallet_currency == "BTC").cloned() {
             info!(wallet_id=%w.id, currency=%w.wallet_currency, "selected BTC wallet");
             Ok(w)
         } else {
-            // Fall back to first available wallet if no BTC wallet
             match wallets.into_iter().next() {
                 Some(w) => {
                     info!(wallet_id=%w.id, currency=%w.wallet_currency, "selected first wallet");
                     Ok(w)
                 }
-                None => {
-                    error!("no wallet found");
-                    Err(anyhow!("no wallet found"))
-                }
+                None => Err(anyhow!("no wallet found")),
             }
         }
     }
 
-    /// Create a BOLT11 invoice on Blink for receiving Lightning payments
+    /// Resolve the configured wallet id, querying the default wallet if unset
+    pub async fn resolve_wallet_id(&self) -> Result<String> {
+        if !self.wallet_id.is_empty() {
+            return Ok(self.wallet_id.clone());
+        }
+        Ok(self.get_default_wallet().await?.id)
+    }
+
+    /// Create a BOLT11 invoice for receiving Lightning payments
     ///
-    /// # Parameters
-    /// - `amount`: Amount in satoshis
-    /// - `memo`: Optional description (appears on invoice)
-    ///
-    /// # Returns
-    /// - Ok(InvoiceDetails): BOLT11 invoice string, payment hash, and other details
-    /// - Err: If mutation fails or response is invalid
-    ///
-    /// # Important
-    /// The returned invoice can be scanned by payers to send Lightning Network payments.
-    /// The payment_hash is used to track this invoice and query its status later.
-    ///
-    /// # Flow
-    /// 1. Resolve wallet ID (from config or query default)
-    /// 2. Send GraphQL mutation to Blink
-    /// 3. Receive BOLT11 invoice string and payment hash
-    /// 4. Return details for client to use
+    /// Returns the invoice details including the BOLT11 payment request and
+    /// its payment hash.
     #[instrument(skip(self), fields(amount, memo))]
     pub async fn create_invoice(&self, amount: u64, memo: &str) -> Result<InvoiceDetails> {
-        // Use configured wallet ID or query for default if not set
-        let wallet_id = if self.wallet_id.is_empty() {
-            let w = self.get_default_wallet().await?;
-            w.id
-        } else {
-            self.wallet_id.clone()
-        };
+        let wallet_id = self.resolve_wallet_id().await?;
         info!(%wallet_id, amount, memo, "creating invoice");
         let q = r#"
         mutation LnInvoiceCreate($input: LnInvoiceCreateInput!) {
@@ -250,7 +185,6 @@ impl BlinkClient {
             invoice: Option<InvoiceDetails>,
             errors: Option<Vec<ErrorDetail>>,
         }
-        // Call GraphQL mutation to create invoice
         let resp: Resp = self
             .gql(
                 q,
@@ -259,12 +193,19 @@ impl BlinkClient {
                 }),
             )
             .await?;
-        if let Some(errs) = resp.ln_invoice_create.errors.as_ref() {
-            if !errs.is_empty() {
-                error!(errors=?errs, "invoice creation errors");
-            }
+        if let Some(errs) = resp
+            .ln_invoice_create
+            .errors
+            .as_ref()
+            .filter(|e| !e.is_empty())
+        {
+            let messages = errs
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(anyhow!(messages));
         }
-        // Extract invoice details or error if not present
         let inv = resp
             .ln_invoice_create
             .invoice
@@ -273,24 +214,55 @@ impl BlinkClient {
         Ok(inv)
     }
 
-    /// Send a Lightning Network payment using a BOLT11 invoice
+    /// Probe the routing fee for paying a BOLT11 invoice, in satoshis
+    #[instrument(skip(self), fields(bolt11_len = bolt11.len()))]
+    pub async fn probe_fee(&self, bolt11: &str) -> Result<u64> {
+        let wallet_id = self.resolve_wallet_id().await?;
+        let q = r#"
+        mutation lnInvoiceFeeProbe($input: LnInvoiceFeeProbeInput!) {
+          lnInvoiceFeeProbe(input: $input) { amount errors { message } }
+        }
+        "#;
+        #[derive(Deserialize)]
+        struct Resp {
+            #[serde(rename = "lnInvoiceFeeProbe")]
+            ln_invoice_fee_probe: FeeProbe,
+        }
+        #[derive(Deserialize)]
+        struct FeeProbe {
+            amount: Option<i64>,
+            errors: Option<Vec<ErrorDetail>>,
+        }
+        let resp: Resp = self
+            .gql(
+                q,
+                serde_json::json!({"input": {"walletId": wallet_id, "paymentRequest": bolt11}}),
+            )
+            .await?;
+        if let Some(errs) = resp
+            .ln_invoice_fee_probe
+            .errors
+            .as_ref()
+            .filter(|e| !e.is_empty())
+        {
+            let messages = errs
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(anyhow!(messages));
+        }
+        let amount = resp
+            .ln_invoice_fee_probe
+            .amount
+            .ok_or_else(|| anyhow!("fee probe amount not present"))?;
+        Ok(amount.max(0) as u64)
+    }
+
+    /// Send a Lightning payment for a BOLT11 invoice
     ///
-    /// # Parameters
-    /// - `bolt11`: BOLT11 invoice string to pay
-    ///
-    /// # Returns
-    /// - Ok(String): Payment status (e.g., "SUCCESS", "PENDING", "FAILED")
-    /// - Err: If payment fails or Blink API error
-    ///
-    /// # Important
-    /// - Payment status is returned immediately but may still be routing
-    /// - Use check_invoice_status_by_request() to query final status
-    /// - Payment is sent from configured wallet ID or default wallet
-    ///
-    /// # Status Values
-    /// - "SUCCESS": Payment completed successfully
-    /// - "PENDING": Payment is still routing/processing
-    /// - "FAILED": Payment failed
+    /// Returns the payment status as reported by Blink
+    /// ("SUCCESS", "PENDING", or "FAILURE").
     #[instrument(skip(self), fields(bolt11_len = bolt11.len()))]
     pub async fn make_payment(&self, bolt11: &str) -> Result<String> {
         info!("making payment");
@@ -309,26 +281,30 @@ impl BlinkClient {
             status: String,
             errors: Option<Vec<ErrorDetail>>,
         }
-        // Resolve wallet ID for payment source
-        let wallet_id = if self.wallet_id.is_empty() {
-            self.get_default_wallet().await?.id
-        } else {
-            self.wallet_id.clone()
-        };
-        // Call GraphQL mutation to send payment
+        let wallet_id = self.resolve_wallet_id().await?;
         let resp: Resp = self
             .gql(q, serde_json::json!({"input": {"walletId": wallet_id, "paymentRequest": bolt11, "memo": ""}}))
             .await?;
-        if let Some(errs) = resp.ln_invoice_payment_send.errors.as_ref() {
-            if !errs.is_empty() {
-                error!(errors=?errs, "payment returned errors");
-            }
+        if let Some(errs) = resp
+            .ln_invoice_payment_send
+            .errors
+            .as_ref()
+            .filter(|e| !e.is_empty())
+        {
+            let messages = errs
+                .iter()
+                .map(|e| e.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(anyhow!(messages));
         }
         info!(status=%resp.ln_invoice_payment_send.status, "payment done");
         Ok(resp.ln_invoice_payment_send.status)
     }
 
-    #[instrument(skip(self), fields(id))]
+    /// Query the status of a payment by its BOLT11 payment request.
+    ///
+    /// Returns `(status, payment_hash, payment_preimage)`.
     #[instrument(skip(self), fields(req_len = payment_request.len()))]
     pub async fn check_invoice_status_by_request(
         &self,
@@ -357,41 +333,21 @@ impl BlinkClient {
             #[serde(rename = "paymentPreimage")]
             payment_preimage: Option<String>,
         }
-        let resp: Resp = match self
+        let resp: Resp = self
             .gql(
                 q,
                 serde_json::json!({"input": {"paymentRequest": payment_request}}),
             )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // log, map, or add context
-                tracing::error!(error=?e, "failed to query status by paymentRequest");
-                return Err(e); // or: return Err(anyhow::anyhow!("status query failed: {e}"));
-            }
-        };
-
+            .await?;
         let s = resp.by_req;
         let preimage = s.payment_preimage.unwrap_or_default();
-        info!(status=%s.status, hash=%s.payment_hash, preimage_len=preimage.len(), "status by request queried");
+        info!(status=%s.status, hash=%s.payment_hash, "status by request queried");
         Ok((s.status, s.payment_hash, preimage))
     }
 
-    pub async fn get_outgoing_payment(&self, id: &str) -> Result<Payment> {
-        info!(%id, "querying outgoing payment by id");
-        let q = r#"
-        query payment($id: ID!) { payment(id: $id) { id amount createdAt } }
-        "#;
-        #[derive(Deserialize)]
-        struct Resp {
-            payment: Payment,
-        }
-        let resp: Resp = self.gql(q, serde_json::json!({"id": id})).await?;
-        info!(payment_id=%resp.payment.id, amount=resp.payment.amount, "outgoing payment fetched");
-        Ok(resp.payment)
-    }
-
+    /// Query the status of a payment by its payment hash.
+    ///
+    /// Returns `(status, payment_request, payment_preimage)`.
     #[instrument(skip(self), fields(hash))]
     pub async fn check_invoice_status_by_hash(
         &self,
@@ -426,11 +382,11 @@ impl BlinkClient {
             .await?;
         let s = resp.ln_invoice_payment_status_by_hash;
         let preimage = s.payment_preimage.unwrap_or_default();
-        info!(status=%s.status, preimage_len=preimage.len(), req_len=s.payment_request.len(), "status queried");
+        info!(status=%s.status, "status by hash queried");
         Ok((s.status, s.payment_request, preimage))
     }
 
-    #[instrument(skip(self), fields(hash))]
+    /// Query payment status by hash with exponential backoff retries
     pub async fn check_invoice_status_with_retry(
         &self,
         payment_hash: &str,
@@ -452,21 +408,6 @@ impl BlinkClient {
                 }
             }
         }
-    }
-
-    #[instrument(skip(self), fields(offer_len = offer.len()))]
-    pub async fn get_offer_quote(&self, offer: &str) -> Result<Quote> {
-        info!("getting offer quote");
-        let q = r#"
-        query quote($offerId: ID!) { quote(offerId: $offerId) { id amount currency expires } }
-        "#;
-        #[derive(Deserialize)]
-        struct Resp {
-            quote: Quote,
-        }
-        let resp: Resp = self.gql(q, serde_json::json!({"offerId": offer})).await?;
-        info!(amount=resp.quote.amount, currency=%resp.quote.currency, "offer quote received");
-        Ok(resp.quote)
     }
 }
 
@@ -494,20 +435,22 @@ pub struct InvoiceDetails {
     pub satoshis: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Payment {
-    pub id: String,
-    pub amount: i64,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
+#[cfg(test)]
+fn initial_backoff() -> Duration {
+    Duration::from_millis(10)
+}
+#[cfg(not(test))]
+fn initial_backoff() -> Duration {
+    Duration::from_secs(1)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Quote {
-    pub id: String,
-    pub amount: i64,
-    pub currency: String,
-    pub expires: String,
+#[cfg(test)]
+fn max_backoff() -> Duration {
+    Duration::from_millis(100)
+}
+#[cfg(not(test))]
+fn max_backoff() -> Duration {
+    Duration::from_secs(30)
 }
 
 #[cfg(test)]
@@ -519,20 +462,14 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
-    // no yield_now needed in these tests
     use wiremock::matchers::{body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     fn mk_client(server: &MockServer, api_key: &str, wallet_id: &str) -> BlinkClient {
-        let cfg = Config {
-            blink_api_url: format!("{}/graphql", server.uri()),
-            blink_api_key: api_key.to_string(),
-            blink_wallet_id: wallet_id.to_string(),
-            server_port: 0,
-            tls_enable: false,
-            tls_cert_path: "".into(),
-            tls_key_path: "".into(),
-            ..crate::settings::Config::default()
+        let cfg = BackendConfig {
+            api_url: format!("{}/graphql", server.uri()),
+            api_key: api_key.to_string(),
+            wallet_id: wallet_id.to_string(),
         };
         BlinkClient::new(&cfg).expect("blink client")
     }
@@ -577,10 +514,8 @@ mod tests {
 
         let client = mk_client(&server, "k", "w");
         let res: Result<serde_json::Value> = client.gql("query { x }", json!({})).await;
-        assert!(
-            res.is_err(),
-            "non-200 with no data should map to error (missing data)"
-        );
+        assert!(res.is_err(), "non-200 with no data should map to error");
+        assert!(res.unwrap_err().to_string().contains("boom"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -597,42 +532,14 @@ mod tests {
 
         let client = mk_client(&server, "k", "w");
         let res: Result<serde_json::Value> = client.gql("query { x }", json!({})).await;
-        assert!(
-            res.is_err(),
-            "presence of GraphQL errors without data should be an error"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_authorization_header_is_set_if_configured() {
-        // Authorization in this client is via X-API-KEY header.
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(header("X-API-KEY", "my-secret"))
-            .and(header("Content-Type", "application/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": { "ok": true }
-            })))
-            .mount(&server)
-            .await;
-
-        #[derive(Deserialize)]
-        struct OkResp {
-            ok: bool,
-        }
-
-        let client = mk_client(&server, "my-secret", "wallet-abc");
-        let out: OkResp = client.gql("query { ok }", json!({})).await.expect("gql ok");
-        assert!(out.ok);
+        assert!(res.is_err(), "GraphQL errors without data should be an error");
+        assert!(res.unwrap_err().to_string().contains("boom"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_create_invoice_success_and_shape() {
         let server = MockServer::start().await;
 
-        // Ensure request carries the mutation and variables with provided walletId/amount/memo
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(body_string_contains("mutation LnInvoiceCreate"))
@@ -664,10 +571,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_create_invoice_mutation_errors_are_returned() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoiceCreate": {
+                        "invoice": null,
+                        "errors": [{"message": "amount too small"}]
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "key", "wallet-123");
+        let res = client.create_invoice(1, "hello").await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("amount too small"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_probe_fee_success() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("mutation lnInvoiceFeeProbe"))
+            .and(body_string_contains("lnbc1test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "lnInvoiceFeeProbe": { "amount": 3, "errors": [] }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = mk_client(&server, "key", "wallet-xyz");
+        let fee = client.probe_fee("lnbc1test").await.expect("fee");
+        assert_eq!(fee, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_make_payment_success_and_error_mapping() {
         let server = MockServer::start().await;
 
-        // Success case
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(body_string_contains("mutation lnInvoicePaymentSend"))
@@ -683,7 +633,6 @@ mod tests {
         let status = client.make_payment("bolt11-xxx").await.expect("payment ok");
         assert_eq!(status, "SUCCESS");
 
-        // Error case (GraphQL errors and no data -> gql error)
         let server_err = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/graphql"))
@@ -695,17 +644,13 @@ mod tests {
 
         let client_err = mk_client(&server_err, "key", "wallet-xyz");
         let res = client_err.make_payment("bolt11-yyy").await;
-        assert!(
-            res.is_err(),
-            "GraphQL errors without data should yield error"
-        );
+        assert!(res.is_err(), "GraphQL errors without data should yield error");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_check_invoice_status_variants() {
         let server = MockServer::start().await;
 
-        // Paid
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(body_string_contains("hash-paid"))
@@ -721,7 +666,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Pending
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(body_string_contains("hash-pending"))
@@ -737,7 +681,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Expired
         Mock::given(method("POST"))
             .and(path("/graphql"))
             .and(body_string_contains("hash-expired"))
@@ -755,7 +698,6 @@ mod tests {
 
         let client = mk_client(&server, "k", "w");
 
-        // PAID
         let (status, req, pre) = client
             .check_invoice_status_by_hash("hash-paid")
             .await
@@ -764,7 +706,6 @@ mod tests {
         assert_eq!(req, "req-paid");
         assert_eq!(pre, "pre");
 
-        // PENDING
         let (status, req, pre) = client
             .check_invoice_status_by_hash("hash-pending")
             .await
@@ -773,7 +714,6 @@ mod tests {
         assert_eq!(req, "req-pending");
         assert_eq!(pre, "");
 
-        // EXPIRED
         let (status, req, pre) = client
             .check_invoice_status_by_hash("hash-expired")
             .await
@@ -785,8 +725,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_check_invoice_status_with_retry_respects_backoff() {
-        // This client retries only on errors (not on "pending" statuses).
-        // Simulate two failures (non-200) then a success while driving virtual time.
         let server = MockServer::start().await;
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -833,23 +771,4 @@ mod tests {
             "should have performed 3 total requests (2 fails + 1 success)"
         );
     }
-}
-
-// Backoff configuration separated for testability
-#[cfg(test)]
-fn initial_backoff() -> Duration {
-    Duration::from_millis(10)
-}
-#[cfg(not(test))]
-fn initial_backoff() -> Duration {
-    Duration::from_secs(1)
-}
-
-#[cfg(test)]
-fn max_backoff() -> Duration {
-    Duration::from_millis(100)
-}
-#[cfg(not(test))]
-fn max_backoff() -> Duration {
-    Duration::from_secs(30)
 }

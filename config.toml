@@ -1,14 +1,22 @@
-# Example configuration for the Rust CDK Blink Payment Processor
-# Copy to config.toml and edit values as needed
+# Example configuration for the CDK Blink Payment Processor
+# Copy to config.toml and edit values as needed.
+# Environment variables override these values (see README.md).
 
+# gRPC server listen address and port
+address = "0.0.0.0"
+port = 50051
+
+# TLS for the gRPC server (paths to PEM files)
+# tls_enable = false
+# tls_cert_path = "certs/server.crt"
+# tls_key_path = "certs/server.key"
+
+[backend]
 # Blink GraphQL endpoint
-blink_api_url = "https://api.blink.sv/graphql"
+api_url = "https://api.blink.sv/graphql"
 
 # Blink API key (required)
-blink_api_key = ""
+api_key = ""
 
-# Optional: wallet id; if empty, default wallet is used
-blink_wallet_id = ""
-
-# gRPC server port
-server_port = 50051
+# Optional: wallet id; if empty, the account's default BTC wallet is used
+wallet_id = ""

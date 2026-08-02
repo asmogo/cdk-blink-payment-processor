@@ -1,44 +1,32 @@
 [package]
 name = "cdk-blink-payment-processor"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 authors = ["asmo <asmogo@protonmail.com>"]
-description = "Rust port of CDK Blink Payment Processor: gRPC server bridging to Blink GraphQL + WebSocket APIs"
+description = "CDK payment processor bridging to Blink GraphQL + WebSocket APIs"
 license = "MIT"
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-bytes = "1"
-chrono = { version = "0.4", features = ["serde"] }
-futures-util = "0.3"
-http = "1"
-lightning-invoice = "0.30"
-prost = "0.13"
+cdk-common = { version = "0.17.3", default-features = false, features = ["mint", "grpc"] }
+cdk-payment-processor = { version = "0.17.3", default-features = false }
 figment = { version = "0.10", features = ["env", "toml"] }
-humantime = "2"
-humantime-serde = "1"
-
+futures-core = "0.3"
+futures-util = "0.3"
+hex = "0.4"
+http = "1"
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "deflate", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "test-util"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tonic = { version = "0.12", features = ["transport", "tls"] }
-tonic-reflection = "0.12"
+tonic = { version = "0.14", features = ["transport", "tls-ring"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-rcgen = "0.12"
-
-[build-dependencies]
-tonic-build = "0.12"
 
 [dev-dependencies]
-wiremock = "0.6"
-proptest = "1"
-tungstenite = "0.21"
 serial_test = "2"
-
-[features]
-default = []
+wiremock = "0.6"

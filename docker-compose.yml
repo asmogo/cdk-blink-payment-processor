@@ -24,13 +24,18 @@ services:
     # volumes:
     #   - ./config.toml:/app/config.toml:ro
   mintd:
-    image: cashubtc/mintd:sha-6496ed6-arm64
+    image: cashubtc/mintd:latest
     container_name: mint
+    depends_on:
+      - payment-processor
     ports:
       - "8085:8085"
     environment:
       - CDK_MINTD_URL=https://example.com
-      - CDK_MINTD_LN_BACKEND=fakewallet
+      # Route mint payments through the Blink payment processor
+      - CDK_MINTD_LN_BACKEND=grpcprocessor
+      - CDK_MINTD_GRPC_PAYMENT_PROCESSOR_ADDRESS=payment-processor
+      - CDK_MINTD_GRPC_PAYMENT_PROCESSOR_PORT=50051
       - CDK_MINTD_LISTEN_HOST=0.0.0.0
       - CDK_MINTD_LISTEN_PORT=8085
       - CDK_MINTD_MNEMONIC=
