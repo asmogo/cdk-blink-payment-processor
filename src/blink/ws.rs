@@ -224,7 +224,10 @@ impl WSClient {
                         // Step 3: Send subscription request for myUpdates
                         let sub_id = format!(
                             "sub-{}",
-                            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0)
                         );
                         // GraphQL subscription to receive incoming payment updates
                         let query = "subscription myUpdates { myUpdates { errors { message } me { id } update { __typename ... on LnUpdate { status transaction { id direction settlementAmount initiationVia { __typename ... on InitiationViaLn { paymentRequest paymentHash } } } } } } }";
